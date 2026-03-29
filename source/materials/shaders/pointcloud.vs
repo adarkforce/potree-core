@@ -12,6 +12,7 @@ in float classification;
 in float returnNumber;
 in float numberOfReturns;
 in float pointSourceID;
+in float overlayScalar;
 in vec4 indices;
 
 
@@ -78,6 +79,9 @@ uniform sampler2D visibleNodes;
 uniform sampler2D gradient;
 uniform sampler2D classificationLUT;
 uniform sampler2D depthMap;
+
+uniform float overlayMin;
+uniform float overlayMax;
 
 #ifdef highlight_point
 	uniform vec3 highlightedPointCoordinate;
@@ -271,6 +275,12 @@ vec3 getReturnNumber() {
 										vec3(0.0, 1.0, 0.0);
 }
 
+// Maps overlay scalar to gradient color
+vec3 getOverlayScalar() {
+	float w = clamp((overlayScalar - overlayMin) / max(overlayMax - overlayMin, 0.0001), 0.0, 1.0);
+	return texture(gradient, vec2(w, 1.0 - w)).rgb;
+}
+
 // Gets source ID color from gradient
 vec3 getSourceID() {
 	float w = mod(pointSourceID, 10.0) / 10.0;
@@ -439,6 +449,8 @@ void main() {
 		vColor = (modelMatrix * vec4(normal, 0.0)).xyz;
 	#elif defined color_type_phong
 		vColor = color;
+	#elif defined color_type_overlay_scalar
+		vColor = getOverlayScalar();
 	#elif defined color_type_composite
 		vColor = getCompositeColor();
 	#endif

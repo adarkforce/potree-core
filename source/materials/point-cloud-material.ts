@@ -193,6 +193,10 @@ export interface IPointCloudMaterialUniforms {
 	highlightedPointScale: IUniform<number>;
 	/** Scale factor for view-dependent sizing */
 	viewScale: IUniform<number>;
+	/** Minimum value for overlay scalar range mapping */
+	overlayMin: IUniform<number>;
+	/** Maximum value for overlay scalar range mapping */
+	overlayMax: IUniform<number>;
 }
 
 const TREE_TYPE_DEFS = {
@@ -232,6 +236,7 @@ const COLOR_DEFS = {
 	[PointColorType.NORMAL]: 'color_type_normal',
 	[PointColorType.PHONG]: 'color_type_phong',
 	[PointColorType.RGB_HEIGHT]: 'color_type_rgb_height',
+	[PointColorType.OVERLAY_SCALAR]: 'color_type_overlay_scalar',
 	[PointColorType.COMPOSITE]: 'color_type_composite'
 };
 
@@ -337,7 +342,9 @@ export class PointCloudMaterial extends RawShaderMaterial
 		highlightedPointColor: makeUniform('fv', DEFAULT_HIGHLIGHT_COLOR.clone()),
 		enablePointHighlighting: makeUniform('b', true),
 		highlightedPointScale: makeUniform('f', 2.0),
-		viewScale: makeUniform('f', 1.0)
+		viewScale: makeUniform('f', 1.0),
+		overlayMin: makeUniform('f', 0.0),
+		overlayMax: makeUniform('f', 1.0)
 	};
 
   @uniform('bbSize') bbSize!: [number, number, number];
@@ -418,6 +425,10 @@ export class PointCloudMaterial extends RawShaderMaterial
 
   @uniform('viewScale') viewScale!: number;
 
+  @uniform('overlayMin') overlayMin!: number;
+
+  @uniform('overlayMax') overlayMax!: number;
+
   // Declare PointCloudMaterial attributes that need shader updates upon change, and set default values.
   @requiresShaderUpdate() useClipBox: boolean = false;
 
@@ -483,6 +494,7 @@ export class PointCloudMaterial extends RawShaderMaterial
 
   	this.defaultAttributeValues.normal = [0, 0, 0];
   	this.defaultAttributeValues.classification = [0, 0, 0];
+  	this.defaultAttributeValues.overlayScalar = [0];
   	this.defaultAttributeValues.indices = [0, 0, 0, 0];
 
   	this.vertexColors = true;

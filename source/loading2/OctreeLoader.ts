@@ -7,10 +7,21 @@ import {OctreeGeometry} from './OctreeGeometry';
 import {RequestManager} from './RequestManager';
 
 /**
+ * Callback invoked after a node's geometry is decoded and ready.
+ * Use to inject overlay attributes onto loaded nodes.
+ */
+export type NodeLoadedCallback = (node: OctreeGeometryNode, geometry: BufferGeometry) => void;
+
+/**
  * NodeLoader is responsible for loading the geometry of octree nodes.
  */
 export class NodeLoader
 {
+	/**
+	 * Optional callback invoked after each node geometry is ready.
+	 */
+	public static onNodeLoaded: NodeLoadedCallback | null = null;
+
 	/**
 	 * Point attributes to be used when loading the geometry.
 	 */
@@ -145,6 +156,11 @@ export class NodeLoader
 				node.loading = false;
 				// Potree.numNodesLoading--;
 				node.octreeGeometry.numNodesLoading--;
+
+				// Invoke overlay hook so consumers can inject processed attributes.
+				if (NodeLoader.onNodeLoaded) {
+					NodeLoader.onNodeLoaded(node, geometry);
+				}
 			};
 
 			let pointAttributes = node.octreeGeometry.pointAttributes;

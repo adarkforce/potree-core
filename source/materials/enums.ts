@@ -37,5 +37,6 @@ export enum PointColorType {
   NORMAL = 11,
   PHONG = 12,
   RGB_HEIGHT = 13,
+  OVERLAY_SCALAR = 14,
   COMPOSITE = 50,
 }
