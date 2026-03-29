@@ -5,7 +5,8 @@ import {PointCloudOctreeGeometryNode} from '../point-cloud-octree-geometry-node'
 import {Version} from '../version';
 import {GetUrlFn, XhrRequest} from './types';
 
-const ClassicWorker = require('../workers/binary-decoder.worker.js').default;
+// Vite-compatible worker instantiation (replaces webpack worker-loader).
+const createClassicWorker = () => new Worker(new URL('../workers/binary-decoder.worker.js', import.meta.url), { type: 'module' });
 
 interface AttributeData {
   attribute: {
@@ -195,11 +196,7 @@ export class BinaryLoader
 			return worker;
 		}
 
-		// return new Worker(
-		//   new URL('../workers/binary-decoder.worker.js', import.meta.url),
-		//   { type: 'module' },
-		// )
-		return new ClassicWorker();
+		return createClassicWorker();
 	}
 
 	private releaseWorker(worker: Worker): void 

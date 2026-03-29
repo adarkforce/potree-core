@@ -1,7 +1,3 @@
-const BrotliDecoderWorker = require('./brotli-decoder.worker.js').default;
-const DecoderWorker = require('./decoder.worker.js').default;
-
-
 /**
  * Enumerates the types of workers available in the worker pool.
  */
@@ -19,20 +15,17 @@ export enum WorkerType {
 
 /**
  * Creates a new worker instance based on the specified worker type.
- *
- * @param type - The type of worker to create.
- * @returns A new instance of a Worker that corresponds to the specified worker type.
- * @throws {Error} If an unknown worker type is provided.
+ * Uses Vite-compatible `new Worker(new URL(...), ...)` pattern.
  */
-function createWorker(type: WorkerType): Worker 
+function createWorker(type: WorkerType): Worker
 {
-	switch (type) 
+	switch (type)
 	{
 		case WorkerType.DECODER_WORKER_BROTLI: {
-			return new BrotliDecoderWorker();
+			return new Worker(new URL('./brotli-decoder.worker.js', import.meta.url), { type: 'module' });
 		}
 		case WorkerType.DECODER_WORKER: {
-			return new DecoderWorker();
+			return new Worker(new URL('./decoder.worker.js', import.meta.url), { type: 'module' });
 		}
 		default:
 			throw new Error('Unknown worker type');
@@ -51,40 +44,28 @@ export class WorkerPool
 
 	/**
 	 * Retrieves a Worker instance from the pool associated with the specified worker type.
-	 * 
-	 * If no worker instances are available, a new worker is created and added to the pool before retrieving one. 
-	 * 
-	 * @param workerType - The type of the worker to retrieve.
-	 * @returns A Worker instance corresponding to the specified worker type.
-	 * @throws Error if the worker type is not recognized or if no workers are available in the pool.
 	 */
 	public getWorker(workerType: WorkerType): Worker
 	{
-		// Throw error if workerType is not recognized
-		if (this.workers[workerType] === undefined) 
+		if (this.workers[workerType] === undefined)
 		{
 			throw new Error('Unknown worker type');
 		}
-		// Given a worker URL, if URL does not exist in the worker object, create a new array with the URL as a key
 		if (this.workers[workerType].length === 0)
 		{
 			let worker = createWorker(workerType);
 			this.workers[workerType].push(worker);
 		}
 		let worker = this.workers[workerType].pop();
-		if (worker === undefined) 
-		{ // Typescript needs this
+		if (worker === undefined)
+		{
 			throw new Error('No workers available');
 		}
-		// Return the last worker in the array and remove it from the array
 		return worker;
 	}
 
 	/**
 	 * Returns a worker instance to the pool for the specified worker type.
-	 *
-	 * @param workerType - The type of the worker, which determines the corresponding pool.
-	 * @param worker - The worker instance to be returned to the pool.
 	 */
 	public returnWorker(workerType: WorkerType, worker: Worker)
 	{

@@ -43,8 +43,10 @@ import {
 import {IClassification, IGradient, IUniform} from './types';
 import {ColorEncoding} from './color-encoding';
 
-const VertShader = require('./shaders/pointcloud.vs').default;
-const FragShader = require('./shaders/pointcloud.fs').default;
+// @ts-ignore — Vite raw import
+import VertShader from './shaders/pointcloud.vs?raw';
+// @ts-ignore — Vite raw import
+import FragShader from './shaders/pointcloud.fs?raw';
 
 /**
  * Configuration parameters for point cloud material rendering.

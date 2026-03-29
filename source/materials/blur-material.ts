@@ -1,6 +1,11 @@
 import {ShaderMaterial, Texture} from 'three';
 import {IUniform} from './types';
 
+// @ts-ignore — Vite raw import
+import BlurVS from './shaders/blur.vs?raw';
+// @ts-ignore — Vite raw import
+import BlurFS from './shaders/blur.fs?raw';
+
 /**
  * Uniforms interface for blur material shader.
  * 
@@ -46,12 +51,12 @@ export class BlurMaterial extends ShaderMaterial
 	/**
 	 * The GLSL source code for the vertex shader.
 	 */
-	public vertexShader = require('./shaders/blur.vs');
+	public vertexShader = BlurVS;
 
 	/**
 	 * The GLSL source code for the fragment shader.
 	 */
-	public fragmentShader = require('./shaders/blur.fs');
+	public fragmentShader = BlurFS;
 
 	/**
 	 * The set of uniforms used by the blur shader.

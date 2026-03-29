@@ -10,7 +10,7 @@
 		"dist"
 	],
 	"type": "module",
-	"main": "dist/index.js",
+	"main": "source/index.ts",
 	"scripts": {
 		"dev": "webpack --mode development --watch --progress --stats-children",
 		"build": "webpack --mode production --config webpack.prod.js",
