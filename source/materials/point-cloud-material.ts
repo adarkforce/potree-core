@@ -494,10 +494,10 @@ export class PointCloudMaterial extends RawShaderMaterial
 
   	this.classification = DEFAULT_CLASSIFICATION;
 
-  	this.defaultAttributeValues.normal = [0, 0, 0];
-  	this.defaultAttributeValues.classification = [0, 0, 0];
-  	this.defaultAttributeValues.overlayScalar = [0];
-  	this.defaultAttributeValues.indices = [0, 0, 0, 0];
+  	(this.defaultAttributeValues as Record<string, number[]>).normal = [0, 0, 0];
+  	(this.defaultAttributeValues as Record<string, number[]>).classification = [0, 0, 0];
+  	(this.defaultAttributeValues as Record<string, number[]>).overlayScalar = [0];
+  	(this.defaultAttributeValues as Record<string, number[]>).indices = [0, 0, 0, 0];
 
   	this.vertexColors = true;
 	
@@ -929,7 +929,7 @@ export class PointCloudMaterial extends RawShaderMaterial
   	const texture = this.visibleNodesTexture;
   	if (texture) 
   	{
-  		texture.image.data.set(data);
+  		(texture.image as { data: Uint8Array }).data.set(data);
   		texture.needsUpdate = true;
   	}
   }

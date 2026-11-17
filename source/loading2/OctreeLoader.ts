@@ -519,9 +519,16 @@ export class OctreeLoader
 
 		octree.projection = metadata.projection;
 		octree.boundingBox = boundingBox;
-		octree.tightBoundingBox = boundingBox.clone();
+		// metadata.boundingBox is the cubic octree root; the real extent of the
+		// data lives in the position attribute's min/max (PotreeConverter 2.x).
+		const positionAttribute = (metadata.attributes as Array<{ name: string; min?: number[]; max?: number[] }>)
+			.find((attribute) => attribute.name === 'position');
+		const tightBoundingBox = positionAttribute?.min && positionAttribute?.max
+			? new Box3(new Vector3(...positionAttribute.min).sub(offset), new Vector3(...positionAttribute.max).sub(offset))
+			: boundingBox.clone();
+		octree.tightBoundingBox = tightBoundingBox;
 		octree.boundingSphere = boundingBox.getBoundingSphere(new Sphere());
-		octree.tightBoundingSphere = boundingBox.getBoundingSphere(new Sphere());
+		octree.tightBoundingSphere = tightBoundingBox.getBoundingSphere(new Sphere());
 		octree.offset = offset;
 		octree.pointAttributes = OctreeLoader.parseAttributes(metadata.attributes);
 

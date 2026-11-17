@@ -19,6 +19,8 @@ const NODE_STRIDE = 5;
 
 export class PointCloudOctreeGeometryNode extends EventDispatcher implements IPointCloudTreeNode 
 {
+	private static idCount = 0;
+
 	public id: number = PointCloudOctreeGeometryNode.idCount++;
 
 	public name: string;
@@ -72,7 +74,6 @@ export class PointCloudOctreeGeometryNode extends EventDispatcher implements IPo
 
 	readonly isGeometryNode: boolean = true;
 
-	private static idCount = 0;
 
 	constructor(name: string, pcoGeometry: PointCloudOctreeGeometry, boundingBox: Box3) 
 	{
