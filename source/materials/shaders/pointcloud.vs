@@ -242,7 +242,19 @@ vec3 getRGB() {
 		return clamp(rgb, 0.0, 1.0);
 	#else
 		return color;
+	#else
+// Potree 2 ("new format") clouds carry colour in the rgba attribute.
+vec3 getRGB() {
+	#if defined(use_rgb_gamma_contrast_brightness)
+		vec3 rgb = pow(rgba.rgb, vec3(rgbGamma));
+		rgb += rgbBrightness;
+		rgb = (rgb - 0.5) * getContrastFactor(rgbContrast) + 0.5;
+		return clamp(rgb, 0.0, 1.0);
+	#else
+		return rgba.rgb;
 	#endif
+}
+#endif
 }
 #endif
 
@@ -412,47 +424,57 @@ void main() {
 
 
 	// POINT COLOR SELECTION
+	// Potree 2 clouds used to always show rgba, ignoring pointColorType, so no
+	// other colour mode (classification, elevation, scalar overlays...) ever
+	// reached the screen. rgba is now only the default.
 	#ifdef new_format
+		#define POTREE_SET_COLOR(c) vColor = vec4((c), rgba.a)
+		vColor = rgba;
+	#else
+		#define POTREE_SET_COLOR(c) vColor = (c)
+	#endif
+
+	#if defined(new_format) && defined(color_type_rgb)
 		vColor = rgba;
 	#elif defined color_type_rgb
-		vColor = getRGB();
+		POTREE_SET_COLOR(getRGB());
 	#elif defined color_type_height
-		vColor = getElevation();
+		POTREE_SET_COLOR(getElevation());
 	#elif defined color_type_rgb_height
 		vec3 cHeight = getElevation();
-		vColor = mix(getRGB(), cHeight, transition);
+		POTREE_SET_COLOR(mix(getRGB(), cHeight, transition));
 	#elif defined color_type_depth
 		float linearDepth = -mvPosition.z;
 		float expDepth = (gl_Position.z / gl_Position.w) * 0.5 + 0.5;
-		vColor = vec3(linearDepth, expDepth, 0.0);
+		POTREE_SET_COLOR(vec3(linearDepth, expDepth, 0.0));
 	#elif defined color_type_intensity
 		float w = getIntensity();
-		vColor = vec3(w);
+		POTREE_SET_COLOR(vec3(w));
 	#elif defined color_type_intensity_gradient
 		float w = getIntensity();
-		vColor = texture(gradient, vec2(w, 1.0 - w)).rgb;
+		POTREE_SET_COLOR(texture(gradient, vec2(w, 1.0 - w)).rgb);
 	#elif defined color_type_color
-		vColor = uColor;
+		POTREE_SET_COLOR(uColor);
 	#elif defined color_type_lod
 		float w = getLOD() / 10.0;
-		vColor = texture(gradient, vec2(w, 1.0 - w)).rgb;
+		POTREE_SET_COLOR(texture(gradient, vec2(w, 1.0 - w)).rgb);
 	#elif defined color_type_point_index
-		vColor = indices.rgb;
+		POTREE_SET_COLOR(indices.rgb);
 	#elif defined color_type_classification
 		vec4 cl = getClassification();
-		vColor = cl.rgb;
+		POTREE_SET_COLOR(cl.rgb);
 	#elif defined color_type_return_number
-		vColor = getReturnNumber();
+		POTREE_SET_COLOR(getReturnNumber());
 	#elif defined color_type_source
-		vColor = getSourceID();
+		POTREE_SET_COLOR(getSourceID());
 	#elif defined color_type_normal
-		vColor = (modelMatrix * vec4(normal, 0.0)).xyz;
+		POTREE_SET_COLOR((modelMatrix * vec4(normal, 0.0)).xyz);
 	#elif defined color_type_phong
-		vColor = color;
+		POTREE_SET_COLOR(color);
 	#elif defined color_type_overlay_scalar
-		vColor = getOverlayScalar();
+		POTREE_SET_COLOR(getOverlayScalar());
 	#elif defined color_type_composite
-		vColor = getCompositeColor();
+		POTREE_SET_COLOR(getCompositeColor());
 	#endif
 	
 	#if !defined color_type_composite && defined color_type_classification
