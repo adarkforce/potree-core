@@ -13,6 +13,9 @@ in float returnNumber;
 in float numberOfReturns;
 in float pointSourceID;
 in float overlayScalar;
+// Per-point overlays written by processing results (defaults: visible, no tint).
+in float overlayVisible;
+in vec4 overlayRGBA;
 in vec4 indices;
 
 
@@ -477,6 +480,16 @@ void main() {
 		POTREE_SET_COLOR(getCompositeColor());
 	#endif
 	
+	// Processing overlays: hidden points (e.g. removed by a filter) are culled,
+	// tinted points (e.g. cluster labels) override the colour mode.
+	if (overlayVisible < 0.5) {
+		gl_Position = vec4(100.0, 100.0, 100.0, 0.0);
+		return;
+	}
+	if (overlayRGBA.a > 0.0) {
+		vColor.rgb = overlayRGBA.rgb;
+	}
+
 	#if !defined color_type_composite && defined color_type_classification
 		if (getClassification().a == 0.0) {
 			gl_Position = vec4(100.0, 100.0, 100.0, 0.0); // Cull point if classification alpha is zero

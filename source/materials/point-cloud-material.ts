@@ -497,6 +497,8 @@ export class PointCloudMaterial extends RawShaderMaterial
   	(this.defaultAttributeValues as Record<string, number[]>).normal = [0, 0, 0];
   	(this.defaultAttributeValues as Record<string, number[]>).classification = [0, 0, 0];
   	(this.defaultAttributeValues as Record<string, number[]>).overlayScalar = [0];
+  	(this.defaultAttributeValues as Record<string, number[]>).overlayVisible = [1];
+  	(this.defaultAttributeValues as Record<string, number[]>).overlayRGBA = [0, 0, 0, 0];
   	(this.defaultAttributeValues as Record<string, number[]>).indices = [0, 0, 0, 0];
 
   	this.vertexColors = true;
