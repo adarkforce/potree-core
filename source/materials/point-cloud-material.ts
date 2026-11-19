@@ -13,6 +13,7 @@ import {
 	RawShaderMaterial,
 	Scene,
 	Texture,
+	Vector2,
 	Vector3,
 	Vector4,
 	WebGLRenderer,
@@ -42,6 +43,7 @@ import {
 } from './texture-generation';
 import {IClassification, IGradient, IUniform} from './types';
 import {ColorEncoding} from './color-encoding';
+import {packVisibleNodes, visibilityTextureRows, VISIBLE_NODES_TEXTURE_WIDTH} from './visibility-texture';
 
 // @ts-ignore — Vite raw import
 import VertShader from './shaders/pointcloud.vs?raw';
@@ -199,7 +201,16 @@ export interface IPointCloudMaterialUniforms {
 	overlayMin: IUniform<number>;
 	/** Maximum value for overlay scalar range mapping */
 	overlayMax: IUniform<number>;
+	/** Points whose overlayScalar lies outside [x, y] are culled while scalarFilterEnabled is 1. */
+	scalarFilterRange: IUniform<Vector2>;
+	/** 1 while the scalar range filter is on. */
+	scalarFilterEnabled: IUniform<number>;
+	/** Per node: 1 when its geometry carries overlayScalar (the filter leaves the others alone). */
+	hasOverlayScalar: IUniform<number>;
 }
+
+/** A closed range of overlayScalar values left visible. */
+export type ScalarFilter = Readonly<{low: number; high: number}>;
 
 const TREE_TYPE_DEFS = {
 	[TreeType.OCTREE]: 'tree_type_octree',
@@ -262,6 +273,11 @@ const OUTPUT_COLOR_ENCODING = {
 export class PointCloudMaterial extends RawShaderMaterial 
 {
 	private static helperVec3 = new Vector3();
+
+	private static helperVec2 = new Vector2();
+
+	/** Texel data of the visible-nodes texture, reused across frames. */
+	private visibleNodesData: Uint8Array = new Uint8Array(0);
 
 	lights = false;
 
@@ -346,7 +362,10 @@ export class PointCloudMaterial extends RawShaderMaterial
 		highlightedPointScale: makeUniform('f', 2.0),
 		viewScale: makeUniform('f', 1.0),
 		overlayMin: makeUniform('f', 0.0),
-		overlayMax: makeUniform('f', 1.0)
+		overlayMax: makeUniform('f', 1.0),
+		scalarFilterRange: makeUniform('fv', new Vector2(-Infinity, Infinity)),
+		scalarFilterEnabled: makeUniform('f', 0),
+		hasOverlayScalar: makeUniform('f', 0)
 	};
 
   @uniform('bbSize') bbSize!: [number, number, number];
@@ -431,6 +450,39 @@ export class PointCloudMaterial extends RawShaderMaterial
 
   @uniform('overlayMax') overlayMax!: number;
 
+  /**
+   * The scalar range filter: points of nodes that carry overlayScalar and whose
+   * value lies outside [low, high] are culled in the vertex shader; null shows
+   * every point. Setting it updates two uniforms: no allocation, no upload.
+   */
+  get scalarFilter(): ScalarFilter | null
+  {
+  	if (this.uniforms.scalarFilterEnabled.value < 0.5)
+  	{
+  		return null;
+  	}
+  	const range = this.uniforms.scalarFilterRange.value;
+  	return {low: range.x, high: range.y};
+  }
+
+  set scalarFilter(filter: ScalarFilter | null)
+  {
+  	if (filter)
+  	{
+  		this.uniforms.scalarFilterRange.value.set(filter.low, filter.high);
+  	}
+  	this.uniforms.scalarFilterEnabled.value = filter ? 1 : 0;
+  	this.uniformsNeedUpdate = true;
+  }
+
+  /** Turns the filter on with [low, high] without allocating a filter object (slider drags). */
+  setScalarFilterRange(low: number, high: number): void
+  {
+  	this.uniforms.scalarFilterRange.value.set(low, high);
+  	this.uniforms.scalarFilterEnabled.value = 1;
+  	this.uniformsNeedUpdate = true;
+  }
+
   // Declare PointCloudMaterial attributes that need shader updates upon change, and set default values.
   @requiresShaderUpdate() useClipBox: boolean = false;
 
@@ -480,10 +532,7 @@ export class PointCloudMaterial extends RawShaderMaterial
   {
   	super();
 
-  	const tex = this.visibleNodesTexture = generateDataTexture(2048, 1, new Color(0xffffff));
-  	tex.minFilter = NearestFilter;
-  	tex.magFilter = NearestFilter;
-  	this.setUniform('visibleNodes', tex);
+  	this.allocateVisibleNodesTexture(1);
 
   	this.treeType = getValid(parameters.treeType, TreeType.OCTREE);
   	this.size = getValid(parameters.size, 1.0);
@@ -519,10 +568,11 @@ export class PointCloudMaterial extends RawShaderMaterial
   		this.gradientTexture = undefined;
   	}
 
-  	if (this.visibleNodesTexture) 
+  	if (this.visibleNodesTexture)
   	{
   		this.visibleNodesTexture.dispose();
   		this.visibleNodesTexture = undefined;
+  		this.visibleNodesData = new Uint8Array(0);
   	}
 
   	this.clearVisibleNodeTextureOffsets();
@@ -843,8 +893,6 @@ export class PointCloudMaterial extends RawShaderMaterial
   	renderer: WebGLRenderer,
   ): void 
   {
-  	const pixelRatio = renderer.getPixelRatio();
-
 	this.useLogDepth = renderer.capabilities.logarithmicDepthBuffer;
 
   	if (camera.type === PERSPECTIVE_CAMERA) 
@@ -870,8 +918,11 @@ export class PointCloudMaterial extends RawShaderMaterial
   	}
   	else 
   	{
-  		this.screenWidth = renderer.domElement.clientWidth * pixelRatio;
-  		this.screenHeight = renderer.domElement.clientHeight * pixelRatio;
+  		// The drawing buffer, not the canvas's CSS box: no DOM read (works on
+  		// an OffscreenCanvas) and exact under any pixel ratio.
+  		const size = renderer.getDrawingBufferSize(PointCloudMaterial.helperVec2);
+  		this.screenWidth = size.x;
+  		this.screenHeight = size.y;
   	}
 
 
@@ -892,48 +943,40 @@ export class PointCloudMaterial extends RawShaderMaterial
   	{
   		this.updateVisibilityTextureData(visibleNodes);
   	}
+  	else 
+  	{
+  		// Texels of another frame would give stale per-node indices.
+  		this.visibleNodeTextureOffsets.clear();
+  	}
   }
 
-  private updateVisibilityTextureData(nodes: PointCloudOctreeNode[]) 
+  private updateVisibilityTextureData(nodes: PointCloudOctreeNode[])
   {
   	nodes.sort(byLevelAndIndex);
 
-  	const data = new Uint8Array(nodes.length * 4);
-  	const offsetsToChild = new Array(nodes.length).fill(Infinity);
-
-  	this.visibleNodeTextureOffsets.clear();
-
-  	for (let i = 0; i < nodes.length; i++) 
+  	const rows = visibilityTextureRows(nodes.length);
+  	if (!this.visibleNodesTexture || (this.visibleNodesTexture.image as { height: number }).height < rows)
   	{
-  		const node = nodes[i];
-
-  		this.visibleNodeTextureOffsets.set(node.name, i);
-
-  		if (i > 0) 
-  		{
-  			const parentName = node.name.slice(0, -1);
-  			const parentOffset = this.visibleNodeTextureOffsets.get(parentName)!;
-  			const parentOffsetToChild = i - parentOffset;
-
-  			offsetsToChild[parentOffset] = Math.min(offsetsToChild[parentOffset], parentOffsetToChild);
-
-  			// tslint:disable:no-bitwise
-  			const offset = parentOffset * 4;
-  			data[offset] = data[offset] | 1 << node.index;
-  			data[offset + 1] = offsetsToChild[parentOffset] >> 8;
-  			data[offset + 2] = offsetsToChild[parentOffset] % 256;
-  			// tslint:enable:no-bitwise
-  		}
-
-  		data[i * 4 + 3] = node.name.length;
+  		this.allocateVisibleNodesTexture(rows);
   	}
+  	packVisibleNodes(nodes, this.visibleNodesData, this.visibleNodeTextureOffsets);
 
-  	const texture = this.visibleNodesTexture;
-  	if (texture) 
+  	if (this.visibleNodesTexture)
   	{
-  		(texture.image as { data: Uint8Array }).data.set(data);
-  		texture.needsUpdate = true;
+  		this.visibleNodesTexture.needsUpdate = true;
   	}
+  }
+
+  /** (Re)creates the visible-nodes texture with `rows` rows: three cannot resize an uploaded texture. */
+  private allocateVisibleNodesTexture(rows: number): void
+  {
+  	this.visibleNodesTexture?.dispose();
+  	const tex = generateDataTexture(VISIBLE_NODES_TEXTURE_WIDTH, rows, new Color(0xffffff));
+  	tex.minFilter = NearestFilter;
+  	tex.magFilter = NearestFilter;
+  	this.visibleNodesTexture = tex;
+  	this.visibleNodesData = (tex.image as { data: Uint8Array }).data;
+  	this.setUniform('visibleNodes', tex);
   }
 
   static makeOnBeforeRender(
@@ -946,7 +989,7 @@ export class PointCloudMaterial extends RawShaderMaterial
   		_renderer: WebGLRenderer,
   		_scene: Scene,
   		_camera: Camera,
-  		_geometry: BufferGeometry,
+  		geometry: BufferGeometry,
   		material: Material,
   	) => 
   	{
@@ -961,9 +1004,12 @@ export class PointCloudMaterial extends RawShaderMaterial
 				{
 					materialUniforms.vnStart.value = vnStart;
 				}
+				materialUniforms.hasOverlayScalar.value = geometry.getAttribute('overlayScalar') ? 1 : 0;
 
+				// visibleNodes is sorted in texture order when the texture is in
+				// use, so a node's texel is its index (indexOf is O(nodes) per draw).
 				materialUniforms.pcIndex.value =
-				pcIndex !== undefined ? pcIndex : octree.visibleNodes.indexOf(node);
+				pcIndex !== undefined ? pcIndex : vnStart !== undefined ? vnStart : octree.visibleNodes.indexOf(node);
 
 				// Remove the cast to any after updating to Three.JS >= r113
 				(material as RawShaderMaterial).uniformsNeedUpdate = true;

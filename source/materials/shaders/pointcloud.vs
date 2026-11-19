@@ -85,6 +85,16 @@ uniform sampler2D depthMap;
 
 uniform float overlayMin;
 uniform float overlayMax;
+// Scalar range filter: a uniform update per slider move, no per-point data.
+uniform vec2 scalarFilterRange;
+uniform float scalarFilterEnabled;
+uniform float hasOverlayScalar;
+
+// One texel per visible node, in rows of textureSize(visibleNodes).x texels.
+vec4 visibleNodeTexel(int i) {
+	int width = textureSize(visibleNodes, 0).x;
+	return texelFetch(visibleNodes, ivec2(i % width, i / width), 0);
+}
 
 #ifdef highlight_point
 	uniform vec3 highlightedPointCoordinate;
@@ -158,7 +168,7 @@ float getLOD() {
 		vec3 index3d = floor((position - offset) / nodeSizeAtLevel + 0.5);
 		int index = int(round(4.0 * index3d.x + 2.0 * index3d.y + index3d.z));
 		
-		vec4 value = texture(visibleNodes, vec2(float(iOffset) / 2048.0, 0.0));
+		vec4 value = visibleNodeTexel(iOffset);
 		int mask = int(round(value.r * 255.0));
 
 		if (isBitSet(mask, index)) {
@@ -195,7 +205,7 @@ float getLOD() {
 	vec3 pos = position;
 		
 	for (float i = 0.0; i <= 1000.0; i++) {
-		vec4 value = texture(visibleNodes, vec2(intOffset / 2048.0, 0.0));
+		vec4 value = visibleNodeTexel(int(intOffset));
 		int children = int(value.r * 255.0);
 		float next = value.g * 255.0;
 		int split = int(value.b * 255.0);
@@ -483,6 +493,11 @@ void main() {
 	// Processing overlays: hidden points (e.g. removed by a filter) are culled,
 	// tinted points (e.g. cluster labels) override the colour mode.
 	if (overlayVisible < 0.5) {
+		gl_Position = vec4(100.0, 100.0, 100.0, 0.0);
+		return;
+	}
+	if (scalarFilterEnabled > 0.5 && hasOverlayScalar > 0.5 &&
+		(overlayScalar < scalarFilterRange.x || overlayScalar > scalarFilterRange.y)) {
 		gl_Position = vec4(100.0, 100.0, 100.0, 0.0);
 		return;
 	}

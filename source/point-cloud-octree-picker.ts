@@ -9,6 +9,7 @@ import {
 	RGBAFormat,
 	Scene,
 	Sphere,
+	Vector2,
 	Vector3,
 	Vector4,
 	WebGLRenderer,
@@ -59,6 +60,8 @@ export class PointCloudOctreePicker
 {
 	private static readonly helperVec3 = new Vector3();
 
+	private static readonly helperVec2 = new Vector2();
+
 	private static readonly helperSphere = new Sphere();
 
 	private static readonly clearColor = new Color();
@@ -93,8 +96,10 @@ export class PointCloudOctreePicker
 		const pickMaterial = pickState.material;
 
 		const pixelRatio = renderer.getPixelRatio();
-		const width = Math.ceil(renderer.domElement.clientWidth * pixelRatio);
-		const height = Math.ceil(renderer.domElement.clientHeight * pixelRatio);
+		// The drawing buffer, not the canvas's CSS box (no DOM read).
+		const drawingBuffer = renderer.getDrawingBufferSize(PointCloudOctreePicker.helperVec2);
+		const width = drawingBuffer.x;
+		const height = drawingBuffer.y;
 		PointCloudOctreePicker.updatePickRenderTarget(this.pickState, width, height);
 
 		const pixelPosition = PointCloudOctreePicker.helperVec3; // Use helper vector to prevent extra allocations.
