@@ -17,6 +17,8 @@ const HARDWARE_THREADS = typeof navigator !== 'undefined' && navigator.hardwareC
 export const MAX_NUM_NODES_LOADING = Math.min(16, Math.max(4, HARDWARE_THREADS - 2));
 /** A node whose load or decode failed this many times is marked failed and skipped. */
 export const MAX_NODE_LOAD_ATTEMPTS = 3;
+/** Wait after a node's first failed load; each further failure waits four times longer. */
+export const LOAD_RETRY_BASE_MS = 250;
 export const PERSPECTIVE_CAMERA = 'PerspectiveCamera';
 export const ORTHOGRAPHIC_CAMERA = 'OrthographicCamera';
 export const COLOR_BLACK = new Color(0, 0, 0);

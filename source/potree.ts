@@ -31,6 +31,7 @@ import {IPointCloudTreeNode, IPotree, IVisibilityUpdateResult, PickPoint} from '
 import {BinaryHeap} from './utils/binary-heap';
 import {Box3Helper} from './utils/box3-helper';
 import {LRU} from './utils/lru';
+import {deriveByteBudget, deviceByteCap, effectivePointBudget, navigatorDeviceMemory} from './utils/memory-budget';
 
 /**
  * Represents an item in a processing queue for point cloud operations.
@@ -71,6 +72,24 @@ export class Potree implements IPotree
 	}
 
 	public lru = new LRU(this._pointBudget);
+
+	/**
+	 * Resident bytes (CPU + GPU) of node geometry the LRU evicts to. null
+	 * (default): derived every frame from the point budget, the measured bytes
+	 * per point and navigator.deviceMemory (see utils/memory-budget.ts).
+	 */
+	public byteBudgetOverride: number | null = null;
+
+	/** The device cap on resident node bytes (a share of navigator.deviceMemory). */
+	public readonly deviceByteCap: number = deviceByteCap(navigatorDeviceMemory());
+
+	/** Recomputes lru.byteBudget; returns the point budget the visible nodes may use. */
+	public updateByteBudget(): number
+	{
+		const bpp = this.lru.bytesPerPoint ?? Number.NaN;
+		this.lru.byteBudget = this.byteBudgetOverride ?? deriveByteBudget(this._pointBudget, bpp, this.deviceByteCap);
+		return effectivePointBudget(this._pointBudget, this.lru.byteBudget, bpp);
+	}
 
 	public async loadPointCloud(url: string, baseUrl: string): Promise<PointCloudOctree>;
 	public async loadPointCloud(url: string, requestManager: RequestManager): Promise<PointCloudOctree>;
@@ -155,6 +174,7 @@ export class Potree implements IPotree
 		{
 			this._pointBudget = value;
 			this.lru.pointBudget = value;
+			this.updateByteBudget();
 			this.lru.freeMemory();
 		}
 	}
@@ -166,6 +186,8 @@ export class Potree implements IPotree
 	): IVisibilityUpdateResult 
 	{
 		let numVisiblePoints = 0;
+		this.lru.beginFrame();
+		const pointBudget = this.updateByteBudget();
 
 		const visibleNodes: PointCloudOctreeNode[] = [];
 		const unloadedGeometry: PointCloudOctreeGeometryNode[] = [];
@@ -186,7 +208,7 @@ export class Potree implements IPotree
 			let node = queueItem.node;
 
 			// If we will end up with too many points, we stop right away.
-			if (numVisiblePoints + node.numPoints > this.pointBudget) 
+			if (numVisiblePoints + node.numPoints > pointBudget) 
 			{
 				break;
 			}
@@ -223,6 +245,8 @@ export class Potree implements IPotree
 					if (node.loaded && loadedToGPUThisFrame >= MAX_LOADS_TO_GPU) 
 					{
 						exceededMaxLoadsToGPU = true;
+						// In view and decoded, waiting for its turn on the GPU: keep it.
+						this.lru.touch(node);
 					}
 					unloadedGeometry.push(node);
 					pointCloud.visibleGeometry.push(node);
@@ -255,11 +279,18 @@ export class Potree implements IPotree
 			);
 		} // end priority queue loop
 
-		const numNodesToLoad = Math.min(this.maxNumNodesLoading, unloadedGeometry.length);
+		// Start up to maxNumNodesLoading loads, skipping nodes that are loading or
+		// backing off after a failure (they would otherwise take the frame's slots).
 		const nodeLoadPromises: Promise<void>[] = [];
-		for (let i = 0; i < numNodesToLoad; i++) 
+		const now = performance.now();
+		for (let i = 0; i < unloadedGeometry.length && nodeLoadPromises.length < this.maxNumNodesLoading; i++) 
 		{
-			nodeLoadPromises.push(unloadedGeometry[i].load());
+			const node = unloadedGeometry[i] as PointCloudOctreeGeometryNode & {loading?: boolean; isBackingOff?: (now: number) => boolean};
+			if (node.loaded || node.loading || node.isBackingOff?.(now))
+			{
+				continue;
+			}
+			nodeLoadPromises.push(node.load());
 		}
 
 		return {

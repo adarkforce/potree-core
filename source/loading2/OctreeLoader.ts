@@ -6,6 +6,8 @@ import {OctreeGeometryNode} from './OctreeGeometryNode';
 import {OctreeGeometry} from './OctreeGeometry';
 import {RequestManager} from './RequestManager';
 import {MAX_NODE_LOAD_ATTEMPTS} from '../constants';
+import {loadRetryDelayMs} from './load-backoff';
+import {releaseArrayOnUpload, KEEP_CPU_ATTRIBUTES} from './release-on-upload';
 
 /**
  * Callback invoked after a node's geometry is decoded and ready.
@@ -55,7 +57,7 @@ export class NodeLoader
 	async load(node: OctreeGeometryNode)
 	{
 
-		if (node.loaded || node.loading)
+		if (node.loaded || node.loading || node.failed || node.isBackingOff())
 		{
 			return;
 		}
@@ -207,41 +209,49 @@ export class NodeLoader
 		for (let property in buffers)
 		{
 			let buffer = buffers[property].buffer;
+			let attribute: BufferAttribute;
 
 			if (property === 'position')
 			{
-				geometry.setAttribute('position', new BufferAttribute(new Float32Array(buffer), 3));
+				attribute = new BufferAttribute(new Float32Array(buffer), 3);
 			}
 			else if (property === 'rgba')
 			{
-				geometry.setAttribute('rgba', new BufferAttribute(new Uint8Array(buffer), 4, true));
+				attribute = new BufferAttribute(new Uint8Array(buffer), 4, true);
 			}
 			else if (property === 'NORMAL')
 			{
-				geometry.setAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
+				property = 'normal';
+				attribute = new BufferAttribute(new Float32Array(buffer), 3);
 			}
 			else if (property === 'INDICES')
 			{
-				let bufferAttribute = new BufferAttribute(new Uint8Array(buffer), 4);
-				bufferAttribute.normalized = true;
-				geometry.setAttribute('indices', bufferAttribute);
+				property = 'indices';
+				attribute = new BufferAttribute(new Uint8Array(buffer), 4);
+				attribute.normalized = true;
 			}
 			else
 			{
-				const bufferAttribute: BufferAttribute & {
+				const scalar: BufferAttribute & {
 					potree?: object
 				} = new BufferAttribute(new Float32Array(buffer), 1);
 
 				let batchAttribute = buffers[property].attribute;
-				bufferAttribute.potree = {
+				scalar.potree = {
 					offset: buffers[property].offset,
 					scale: buffers[property].scale,
-					preciseBuffer: buffers[property].preciseBuffer,
 					range: batchAttribute.range
 				};
-
-				geometry.setAttribute(property, bufferAttribute);
+				attribute = scalar;
 			}
+
+			// Nothing on the CPU reads these once they are on the GPU (picking
+			// reads positions, overlays rewrite classification in place).
+			if (!KEEP_CPU_ATTRIBUTES.has(property))
+			{
+				releaseArrayOnUpload(attribute);
+			}
+			geometry.setAttribute(property, attribute);
 		}
 		node.density = data.density;
 		node.geometry = geometry;
@@ -276,6 +286,9 @@ export class NodeLoader
 		node.loading = false;
 		node.octreeGeometry.numNodesLoading = Math.max(0, node.octreeGeometry.numNodesLoading - 1);
 		node.loadAttempts++;
+		// Back off before retrying, so a transient fault (I/O hiccup, worker
+		// restart) does not burn every attempt within three frames.
+		node.retryAfter = performance.now() + loadRetryDelayMs(node.loadAttempts);
 		NodeLoader.stats.failures++;
 		if (node.loadAttempts >= MAX_NODE_LOAD_ATTEMPTS)
 		{

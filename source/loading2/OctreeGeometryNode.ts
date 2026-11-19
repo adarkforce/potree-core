@@ -1,6 +1,7 @@
 import {IPointCloudTreeNode} from './../types';
 import {Box3, Sphere, BufferGeometry} from 'three';
 import {OctreeGeometry} from './OctreeGeometry';
+import {geometryBytes} from '../utils/memory-budget';
 
 /**
  * Represents a node in an octree structure for point cloud geometry.
@@ -18,6 +19,9 @@ export class OctreeGeometryNode implements IPointCloudTreeNode {
 
 	/** Failed load or decode attempts so far. */
 	public loadAttempts: number = 0;
+
+	/** After a failed load, no new attempt before this time (performance.now(), ms). */
+	public retryAfter: number = 0;
 
 	/** Reference to the parent node, or null if this is the root. */
 	public parent: OctreeGeometryNode | null = null;
@@ -115,8 +119,19 @@ export class OctreeGeometryNode implements IPointCloudTreeNode {
 		return this.boundingBox;
 	}
 
+	/** CPU + GPU bytes of this node's geometry (0 when not loaded); read by the LRU. */
+	public get residentBytes(): number {
+		const {cpu, gpu} = geometryBytes(this.geometry);
+		return cpu + gpu;
+	}
+
+	/** Whether a failed load is still backing off at time `now`. */
+	public isBackingOff(now: number = performance.now()): boolean {
+		return this.loadAttempts > 0 && now < this.retryAfter;
+	}
+
 	public load() {
-		if (this.octreeGeometry.numNodesLoading >= this.octreeGeometry.maxNumNodesLoading) {
+		if (this.octreeGeometry.numNodesLoading >= this.octreeGeometry.maxNumNodesLoading || this.isBackingOff()) {
 			return;
 		}
 
@@ -129,8 +144,12 @@ export class OctreeGeometryNode implements IPointCloudTreeNode {
 		return this.numPoints;
 	}
 
+	/**
+	 * Frees the geometry and runs the dispose handlers. The LRU never evicts the
+	 * root; it is disposed here when its cloud is closed.
+	 */
 	public dispose(): void {
-		if (this.geometry && this.parent != null) {
+		if (this.geometry) {
 			this.geometry.dispose();
 			this.geometry = null;
 			this.loaded = false;

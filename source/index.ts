@@ -13,3 +13,8 @@ export * from './types';
 export * from './version';
 export {NodeLoader} from './loading2/OctreeLoader';
 export type {NodeLoadedCallback} from './loading2/OctreeLoader';
+export * from './utils/memory-budget';
+export {LRU} from './utils/lru';
+export {isReleased, KEEP_CPU_ATTRIBUTES} from './loading2/release-on-upload';
+export {loadRetryDelayMs} from './loading2/load-backoff';
+export {packVisibleNodes, visibilityTextureRows, VISIBLE_NODES_TEXTURE_WIDTH} from './materials/visibility-texture';

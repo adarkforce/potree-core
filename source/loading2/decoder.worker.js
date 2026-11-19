@@ -1,18 +1,5 @@
 import {PointAttribute, PointAttributeTypes} from './PointAttributes.ts';
 
-const typedArrayMapping = {
-	'int8': Int8Array,
-	'int16': Int16Array,
-	'int32': Int32Array,
-	'int64': Float64Array,
-	'uint8': Uint8Array,
-	'uint16': Uint16Array,
-	'uint32': Uint32Array,
-	'uint64': Float64Array,
-	'float': Float32Array,
-	'double': Float64Array
-};
-
 // Potree = {};
 
 onmessage = function(event) 
@@ -117,9 +104,8 @@ onmessage = function(event)
 			const buff = new ArrayBuffer(numPoints * 4);
 			const f32 = new Float32Array(buff);
 
-			const TypedArray = typedArrayMapping[pointAttribute.type.name];
-			const preciseBuffer = new TypedArray(numPoints);
-
+			// No full-precision copy: nothing reads it, and it was posted back
+			// by structured clone (a copy) for every scalar attribute.
 			let [offset, scale] = [0, 1];
 
 			const getterMap = {
@@ -150,12 +136,10 @@ onmessage = function(event)
 				const value = getter(pointOffset + attributeOffset, true);
 
 				f32[j] = (value - offset) * scale;
-				preciseBuffer[j] = value;
 			}
 
 			attributeBuffers[pointAttribute.name] = { 
 				buffer: buff,
-				preciseBuffer: preciseBuffer,
 				attribute: pointAttribute,
 				offset: offset,
 				scale: scale
