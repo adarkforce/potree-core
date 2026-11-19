@@ -54,7 +54,12 @@ const mask_b0 = new Uint8Array([0, 1, 0, 1, 0, 1, 0, 1, 2, 3, 2, 3, 2, 3, 2, 3, 
 onmessage = function(event) 
 {
 
-	const {pointAttributes, scale, name, min, max, size, offset, numPoints} = event.data;
+	const {pointAttributes, scale, name, min, max, size, offset, numPoints, debugThrow} = event.data;
+
+	if (debugThrow)
+	{
+		throw new Error(`injected decoder fault (node ${name})`);
+	}
 
 	const tStart = performance.now();
 

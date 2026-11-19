@@ -13,6 +13,12 @@ export class OctreeGeometryNode implements IPointCloudTreeNode {
 	/** Indicates if the node's geometry is currently loading. */
 	public loading: boolean = false;
 
+	/** Set after MAX_NODE_LOAD_ATTEMPTS failed loads; Potree then skips the node. */
+	public failed: boolean = false;
+
+	/** Failed load or decode attempts so far. */
+	public loadAttempts: number = 0;
+
 	/** Reference to the parent node, or null if this is the root. */
 	public parent: OctreeGeometryNode | null = null;
 

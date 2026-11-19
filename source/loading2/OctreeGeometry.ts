@@ -2,6 +2,7 @@ import {NodeLoader, Metadata} from './OctreeLoader';
 import {Box3, Sphere, Vector3} from 'three';
 import {PointAttributes} from './PointAttributes';
 import {OctreeGeometryNode} from './OctreeGeometryNode';
+import {MAX_NUM_NODES_LOADING} from '../constants';
 
 export class OctreeGeometry {
 	public root!: OctreeGeometryNode;
@@ -16,7 +17,9 @@ export class OctreeGeometry {
 
 	public numNodesLoading: number = 0;
 
-	public maxNumNodesLoading: number = 3; // I don't understand why this is also a property of IPotree then. Duplicate functionality?
+	// Potree.maxNumNodesLoading caps how many loads are started per frame; this caps
+	// how many run at once. Both default to the same hardware-derived value.
+	public maxNumNodesLoading: number = MAX_NUM_NODES_LOADING;
 
 	public boundingSphere: Sphere;
 

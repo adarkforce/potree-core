@@ -18,7 +18,12 @@ const typedArrayMapping = {
 onmessage = function(event) 
 {
 
-	const {buffer, pointAttributes, scale, name, min, max, size, offset, numPoints} = event.data;
+	const {buffer, pointAttributes, scale, name, min, max, size, offset, numPoints, debugThrow} = event.data;
+
+	if (debugThrow)
+	{
+		throw new Error(`injected decoder fault (node ${name})`);
+	}
 
 	const tStart = performance.now();
 

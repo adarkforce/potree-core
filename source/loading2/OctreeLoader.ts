@@ -5,6 +5,7 @@ import {WorkerPool, WorkerType} from './WorkerPool';
 import {OctreeGeometryNode} from './OctreeGeometryNode';
 import {OctreeGeometry} from './OctreeGeometry';
 import {RequestManager} from './RequestManager';
+import {MAX_NODE_LOAD_ATTEMPTS} from '../constants';
 
 /**
  * Callback invoked after a node's geometry is decoded and ready.
@@ -21,6 +22,12 @@ export class NodeLoader
 	 * Optional callback invoked after each node geometry is ready.
 	 */
 	public static onNodeLoaded: NodeLoadedCallback | null = null;
+
+	/** Running totals across every cloud: nodes decoded, loads or decodes that failed. */
+	public static readonly stats = {loaded: 0, failures: 0};
+
+	/** Test hook: the next N decodes throw inside the decoder worker. */
+	public static debugFailNextDecodes = 0;
 
 	/**
 	 * Point attributes to be used when loading the geometry.
@@ -97,69 +104,40 @@ export class NodeLoader
 
 			const workerType = this.metadata.encoding === 'BROTLI' ? WorkerType.DECODER_WORKER_BROTLI : WorkerType.DECODER_WORKER;
 			const worker = this.workerPool.getWorker(workerType);
-
-			worker.onmessage = (e) => 
+			const detach = () =>
 			{
+				worker.onmessage = null;
+				worker.onerror = null;
+				worker.onmessageerror = null;
+			};
 
-				let data = e.data;
-				let buffers = data.attributeBuffers;
-
+			// A decoder that throws never posts a reply: without these handlers the
+			// node stays "loading" and holds a slot of maxNumNodesLoading forever.
+			worker.onerror = (event) =>
+			{
+				event.preventDefault();
+				detach();
+				// Its state after an uncaught exception is unknown: start a fresh one.
+				worker.terminate();
+				this.loadFailed(node, `decoder error: ${event.message}`);
+			};
+			worker.onmessageerror = () =>
+			{
+				detach();
 				this.workerPool.returnWorker(workerType, worker);
-
-				let geometry = new BufferGeometry();
-				
-				for (let property in buffers)
+				this.loadFailed(node, 'decoder reply could not be deserialized');
+			};
+			worker.onmessage = (e) =>
+			{
+				detach();
+				this.workerPool.returnWorker(workerType, worker);
+				try
 				{
-
-					let buffer = buffers[property].buffer;
-
-					if (property === 'position')
-					{
-						geometry.setAttribute('position', new BufferAttribute(new Float32Array(buffer), 3));
-					}
-					else if (property === 'rgba')
-					{
-						geometry.setAttribute('rgba', new BufferAttribute(new Uint8Array(buffer), 4, true));
-					}
-					else if (property === 'NORMAL')
-					{
-						// geometry.setAttribute('rgba', new BufferAttribute(new Uint8Array(buffer), 4, true));
-						geometry.setAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
-					}
-					else if (property === 'INDICES') 
-					{
-						let bufferAttribute = new BufferAttribute(new Uint8Array(buffer), 4);
-						bufferAttribute.normalized = true;
-						geometry.setAttribute('indices', bufferAttribute);
-					}
-					else 
-					{
-						const bufferAttribute: BufferAttribute & {
-							potree?: object
-						} = new BufferAttribute(new Float32Array(buffer), 1);
-
-						let batchAttribute = buffers[property].attribute;
-						bufferAttribute.potree = {
-							offset: buffers[property].offset,
-							scale: buffers[property].scale,
-							preciseBuffer: buffers[property].preciseBuffer,
-							range: batchAttribute.range
-						};
-
-						geometry.setAttribute(property, bufferAttribute);
-					}
-
+					this.onDecoded(node, e.data);
 				}
-				node.density = data.density;
-				node.geometry = geometry;
-				node.loaded = true;
-				node.loading = false;
-				// Potree.numNodesLoading--;
-				node.octreeGeometry.numNodesLoading--;
-
-				// Invoke overlay hook so consumers can inject processed attributes.
-				if (NodeLoader.onNodeLoaded) {
-					NodeLoader.onNodeLoaded(node, geometry);
+				catch (error)
+				{
+					this.loadFailed(node, String(error));
 				}
 			};
 
@@ -174,6 +152,12 @@ export class NodeLoader
 
 			let offset = node.octreeGeometry.loader.offset;
 
+			const injectFault = NodeLoader.debugFailNextDecodes > 0;
+			if (injectFault)
+			{
+				NodeLoader.debugFailNextDecodes--;
+			}
+
 			let message = {
 				name: node.name,
 				buffer: buffer,
@@ -183,17 +167,121 @@ export class NodeLoader
 				max: max,
 				size: size,
 				offset: offset,
-				numPoints: numPoints
+				numPoints: numPoints,
+				debugThrow: injectFault
 			};
 
-			worker.postMessage(message, [message.buffer]);
+			try
+			{
+				worker.postMessage(message, [message.buffer]);
+			}
+			catch (error)
+			{
+				detach();
+				this.workerPool.returnWorker(workerType, worker);
+				throw error;
+			}
 		}
 		catch (e)
 		{
-			node.loaded = false;
-			node.loading = false;
-			node.octreeGeometry.numNodesLoading--;
+			this.loadFailed(node, String(e));
 		}
+	}
+
+	/**
+	 * Turns a decoder reply into the node's geometry.
+	 */
+	private onDecoded(node: OctreeGeometryNode, data: any): void
+	{
+		if (node.octreeGeometry.disposed)
+		{
+			// The cloud was closed while this node decoded: keep nothing.
+			node.loading = false;
+			node.octreeGeometry.numNodesLoading = Math.max(0, node.octreeGeometry.numNodesLoading - 1);
+			return;
+		}
+
+		let buffers = data.attributeBuffers;
+		let geometry = new BufferGeometry();
+
+		for (let property in buffers)
+		{
+			let buffer = buffers[property].buffer;
+
+			if (property === 'position')
+			{
+				geometry.setAttribute('position', new BufferAttribute(new Float32Array(buffer), 3));
+			}
+			else if (property === 'rgba')
+			{
+				geometry.setAttribute('rgba', new BufferAttribute(new Uint8Array(buffer), 4, true));
+			}
+			else if (property === 'NORMAL')
+			{
+				geometry.setAttribute('normal', new BufferAttribute(new Float32Array(buffer), 3));
+			}
+			else if (property === 'INDICES')
+			{
+				let bufferAttribute = new BufferAttribute(new Uint8Array(buffer), 4);
+				bufferAttribute.normalized = true;
+				geometry.setAttribute('indices', bufferAttribute);
+			}
+			else
+			{
+				const bufferAttribute: BufferAttribute & {
+					potree?: object
+				} = new BufferAttribute(new Float32Array(buffer), 1);
+
+				let batchAttribute = buffers[property].attribute;
+				bufferAttribute.potree = {
+					offset: buffers[property].offset,
+					scale: buffers[property].scale,
+					preciseBuffer: buffers[property].preciseBuffer,
+					range: batchAttribute.range
+				};
+
+				geometry.setAttribute(property, bufferAttribute);
+			}
+		}
+		node.density = data.density;
+		node.geometry = geometry;
+		node.loaded = true;
+		node.loading = false;
+		node.loadAttempts = 0;
+		node.octreeGeometry.numNodesLoading = Math.max(0, node.octreeGeometry.numNodesLoading - 1);
+		NodeLoader.stats.loaded++;
+
+		// Invoke overlay hook so consumers can inject processed attributes. A
+		// throwing hook must not turn a loaded node back into a failed one.
+		if (NodeLoader.onNodeLoaded)
+		{
+			try
+			{
+				NodeLoader.onNodeLoaded(node, geometry);
+			}
+			catch (error)
+			{
+				console.error(`potree-core: onNodeLoaded threw for ${node.name}`, error);
+			}
+		}
+	}
+
+	/**
+	 * Frees the node's loading slot so streaming goes on; after
+	 * MAX_NODE_LOAD_ATTEMPTS failures the node is marked failed and skipped.
+	 */
+	private loadFailed(node: OctreeGeometryNode, reason: string): void
+	{
+		node.loaded = false;
+		node.loading = false;
+		node.octreeGeometry.numNodesLoading = Math.max(0, node.octreeGeometry.numNodesLoading - 1);
+		node.loadAttempts++;
+		NodeLoader.stats.failures++;
+		if (node.loadAttempts >= MAX_NODE_LOAD_ATTEMPTS)
+		{
+			node.failed = true;
+		}
+		console.warn(`potree-core: loading node ${node.name} failed (attempt ${node.loadAttempts}): ${reason}`);
 	}
 
 	public parseHierarchy(node: OctreeGeometryNode, buffer: ArrayBuffer)
