@@ -44,6 +44,17 @@ import {
 import {IClassification, IGradient, IUniform} from './types';
 import {ColorEncoding} from './color-encoding';
 import {packVisibleNodes, visibilityTextureRows, VISIBLE_NODES_TEXTURE_WIDTH} from './visibility-texture';
+import {
+	ClipAabbMode,
+	FilterAttribute,
+	MAX_ATTRIBUTE_FILTERS,
+	NodeResultEntry,
+	NodeResultState,
+	ScalarSource,
+	scalarFilterDomain,
+	setClassBit,
+	slopeToAbsNz
+} from './style';
 
 // @ts-ignore — Vite raw import
 import VertShader from './shaders/pointcloud.vs?raw';
@@ -207,6 +218,48 @@ export interface IPointCloudMaterialUniforms {
 	scalarFilterEnabled: IUniform<number>;
 	/** Per node: 1 when its geometry carries overlayScalar (the filter leaves the others alone). */
 	hasOverlayScalar: IUniform<number>;
+	/** Live style (see style.ts): 256-bit hidden-class mask, every colour mode. */
+	classHidden: IUniform<Int32Array>;
+	/** Attribute filter slots: FilterAttribute per slot (0 = off). */
+	attrFilterAttr: IUniform<Int32Array>;
+	/** Attribute filter slots: [low, high] pairs, stored units. */
+	attrFilterRange: IUniform<Float32Array>;
+	/** ClipAabbMode: 0 off, 1 keep inside, 2 keep outside. */
+	clipAabbMode: IUniform<number>;
+	/** Clip box min, cloud frame. */
+	clipAabbMin: IUniform<Vector3>;
+	/** Clip box max, cloud frame. */
+	clipAabbMax: IUniform<Vector3>;
+	/** Per node: its box min in the cloud frame. */
+	nodeOffset: IUniform<Vector3>;
+	/** ScalarSource. */
+	scalarSource: IUniform<number>;
+	/** CovarianceFeature shown when scalarSource is FEATURE. */
+	featureIndex: IUniform<number>;
+	/** scalarFilterRange mapped to the exact test's domain (scalarFilterDomain()). */
+	scalarFilterDomain: IUniform<Vector2>;
+	/** 1 while the slope filter over stored normals is on. */
+	normalFilterEnabled: IUniform<number>;
+	/** Slope filter as a |n.z| range. */
+	normalFilterAbsNz: IUniform<Vector2>;
+	/** Per node: 1 when the geometry carries overlayEigen. */
+	hasOverlayEigen: IUniform<number>;
+	/** Per node: 1 when the geometry carries normal. */
+	hasNormal: IUniform<number>;
+	/** Per node: 1 when the geometry carries rgba. */
+	hasRgba: IUniform<number>;
+	/** 1: apply rgbGamma / rgbBrightness / rgbContrast (no recompile). */
+	rgbAdjust: IUniform<number>;
+	/** Per node: NodeResultState. */
+	nodeResultState: IUniform<number>;
+	/** Per node: ms since its result arrived. */
+	resultAge: IUniform<number>;
+	/** 1: mark preview nodes (desaturated, shimmer). */
+	previewMarks: IUniform<number>;
+	/** 1: no shimmer (prefers-reduced-motion). */
+	reducedMotion: IUniform<number>;
+	/** Seconds; drives the preview shimmer. */
+	styleTime: IUniform<number>;
 }
 
 /** A closed range of overlayScalar values left visible. */
@@ -365,8 +418,35 @@ export class PointCloudMaterial extends RawShaderMaterial
 		overlayMax: makeUniform('f', 1.0),
 		scalarFilterRange: makeUniform('fv', new Vector2(-Infinity, Infinity)),
 		scalarFilterEnabled: makeUniform('f', 0),
-		hasOverlayScalar: makeUniform('f', 0)
+		hasOverlayScalar: makeUniform('f', 0),
+		classHidden: makeUniform('iv1', new Int32Array(8)),
+		attrFilterAttr: makeUniform('iv1', new Int32Array(MAX_ATTRIBUTE_FILTERS)),
+		attrFilterRange: makeUniform('fv', new Float32Array(2 * MAX_ATTRIBUTE_FILTERS)),
+		clipAabbMode: makeUniform('f', 0),
+		clipAabbMin: makeUniform('fv', new Vector3(-Infinity, -Infinity, -Infinity)),
+		clipAabbMax: makeUniform('fv', new Vector3(Infinity, Infinity, Infinity)),
+		nodeOffset: makeUniform('fv', new Vector3()),
+		scalarSource: makeUniform('i', 0),
+		featureIndex: makeUniform('i', 0),
+		scalarFilterDomain: makeUniform('fv', new Vector2(-Infinity, Infinity)),
+		normalFilterEnabled: makeUniform('f', 0),
+		normalFilterAbsNz: makeUniform('fv', new Vector2(-Infinity, Infinity)),
+		hasOverlayEigen: makeUniform('f', 0),
+		hasNormal: makeUniform('f', 0),
+		hasRgba: makeUniform('f', 0),
+		rgbAdjust: makeUniform('f', 0),
+		nodeResultState: makeUniform('f', 0),
+		resultAge: makeUniform('f', 1e9),
+		previewMarks: makeUniform('f', 1),
+		reducedMotion: makeUniform('f', 0),
+		styleTime: makeUniform('f', 0)
 	};
+
+	/** Live result state per node name (shared with copies made by copyStyleFrom). */
+	nodeResultStates: Map<string, NodeResultEntry> = new Map();
+
+	/** State of nodes absent from nodeResultStates. */
+	defaultNodeResultState: NodeResultState = NodeResultState.UNTRACKED;
 
   @uniform('bbSize') bbSize!: [number, number, number];
 
@@ -394,11 +474,13 @@ export class PointCloudMaterial extends RawShaderMaterial
 
   @uniform('opacity', true) opacity!: number;
 
-  @uniform('rgbBrightness', true) rgbBrightness!: number;
+  // Uniform-only: the rgbAdjust switch replaces the old define, so a slider
+  // drag never recompiles (set the rgbAdjust uniform to 1 to apply them).
+  @uniform('rgbBrightness') rgbBrightness!: number;
 
-  @uniform('rgbContrast', true) rgbContrast!: number;
+  @uniform('rgbContrast') rgbContrast!: number;
 
-  @uniform('rgbGamma', true) rgbGamma!: number;
+  @uniform('rgbGamma') rgbGamma!: number;
 
   @uniform('screenHeight') screenHeight!: number;
 
@@ -470,6 +552,7 @@ export class PointCloudMaterial extends RawShaderMaterial
   	if (filter)
   	{
   		this.uniforms.scalarFilterRange.value.set(filter.low, filter.high);
+  		this.syncScalarFilterDomain();
   	}
   	this.uniforms.scalarFilterEnabled.value = filter ? 1 : 0;
   	this.uniformsNeedUpdate = true;
@@ -479,7 +562,132 @@ export class PointCloudMaterial extends RawShaderMaterial
   setScalarFilterRange(low: number, high: number): void
   {
   	this.uniforms.scalarFilterRange.value.set(low, high);
+  	this.syncScalarFilterDomain();
   	this.uniforms.scalarFilterEnabled.value = 1;
+  	this.uniformsNeedUpdate = true;
+  }
+
+  /** Recomputes scalarFilterDomain from the range, the scalar source and the feature. */
+  private syncScalarFilterDomain(): void
+  {
+  	const range = this.uniforms.scalarFilterRange.value;
+  	const [lo, hi] = scalarFilterDomain(this.uniforms.scalarSource.value, this.uniforms.featureIndex.value, range.x, range.y);
+  	this.uniforms.scalarFilterDomain.value.set(lo, hi);
+  }
+
+  /**
+   * What the scalar colour mode and the scalar filter read: overlayScalar, a
+   * covariance feature of overlayEigen (Select Field), slope or verticality
+   * of the stored normal. Uniform-only.
+   */
+  setScalarSource(source: ScalarSource, feature: number = 0): void
+  {
+  	this.uniforms.scalarSource.value = source;
+  	this.uniforms.featureIndex.value = Math.trunc(feature);
+  	this.syncScalarFilterDomain();
+  	this.uniformsNeedUpdate = true;
+  }
+
+  /** Hides (or shows) points of the given class in every colour mode. */
+  setClassHidden(cls: number, hidden: boolean): void
+  {
+  	setClassBit(this.uniforms.classHidden.value, cls, hidden);
+  	this.uniformsNeedUpdate = true;
+  }
+
+  /** Replaces the hidden-class set. */
+  setHiddenClasses(classes: Iterable<number>): void
+  {
+  	const mask = this.uniforms.classHidden.value;
+  	mask.fill(0);
+  	for (const c of classes)
+  	{
+  		setClassBit(mask, c, true);
+  	}
+  	this.uniformsNeedUpdate = true;
+  }
+
+  /** Attribute range filter in slot 0..3: keep [low, high] of `attribute` (stored units); OFF clears it. */
+  setAttributeFilter(slot: number, attribute: FilterAttribute, low: number = -Infinity, high: number = Infinity): void
+  {
+  	if (slot < 0 || slot >= MAX_ATTRIBUTE_FILTERS)
+  	{
+  		throw new RangeError(`attribute filter slot ${slot} out of [0, ${MAX_ATTRIBUTE_FILTERS})`);
+  	}
+  	this.uniforms.attrFilterAttr.value[slot] = attribute;
+  	this.uniforms.attrFilterRange.value[2 * slot] = low;
+  	this.uniforms.attrFilterRange.value[2 * slot + 1] = high;
+  	this.uniformsNeedUpdate = true;
+  }
+
+  /** Axis-aligned clip box in the cloud frame (PassThrough, height range); OFF disables it. */
+  setClipAabb(mode: ClipAabbMode, min?: Vector3, max?: Vector3): void
+  {
+  	this.uniforms.clipAabbMode.value = mode;
+  	if (min)
+  	{
+  		this.uniforms.clipAabbMin.value.copy(min);
+  	}
+  	if (max)
+  	{
+  		this.uniforms.clipAabbMax.value.copy(max);
+  	}
+  	this.uniformsNeedUpdate = true;
+  }
+
+  /** Slope filter over stored normals: keep slopes in [lowDeg, highDeg]; null disables it. */
+  setNormalFilter(range: Readonly<{lowDeg: number; highDeg: number}> | null): void
+  {
+  	if (range)
+  	{
+  		const [lo, hi] = slopeToAbsNz(range.lowDeg, range.highDeg);
+  		this.uniforms.normalFilterAbsNz.value.set(lo, hi);
+  	}
+  	this.uniforms.normalFilterEnabled.value = range ? 1 : 0;
+  	this.uniformsNeedUpdate = true;
+  }
+
+  /** Per-node live result state; `since` is the performance.now() of its arrival (drives the fade-in). */
+  setNodeResultState(nodeName: string, state: NodeResultState, since: number): void
+  {
+  	this.nodeResultStates.set(nodeName, {state, since});
+  }
+
+  /** Forgets every node's state; nodes then draw as `defaultState`. */
+  resetNodeResultStates(defaultState: NodeResultState = NodeResultState.UNTRACKED): void
+  {
+  	this.nodeResultStates.clear();
+  	this.defaultNodeResultState = defaultState;
+  }
+
+  /**
+   * Copies the live style onto another material of the same cloud (the HQ
+   * splat renderer's passes): uniform values, and the node states by
+   * reference. Allocation-free; call it every pass.
+   */
+  copyStyleFrom(source: PointCloudMaterial): void
+  {
+  	const s = source.uniforms;
+  	const t = this.uniforms;
+  	t.classHidden.value.set(s.classHidden.value);
+  	t.attrFilterAttr.value.set(s.attrFilterAttr.value);
+  	t.attrFilterRange.value.set(s.attrFilterRange.value);
+  	t.clipAabbMode.value = s.clipAabbMode.value;
+  	t.clipAabbMin.value.copy(s.clipAabbMin.value);
+  	t.clipAabbMax.value.copy(s.clipAabbMax.value);
+  	t.scalarSource.value = s.scalarSource.value;
+  	t.featureIndex.value = s.featureIndex.value;
+  	t.scalarFilterRange.value.copy(s.scalarFilterRange.value);
+  	t.scalarFilterDomain.value.copy(s.scalarFilterDomain.value);
+  	t.scalarFilterEnabled.value = s.scalarFilterEnabled.value;
+  	t.normalFilterEnabled.value = s.normalFilterEnabled.value;
+  	t.normalFilterAbsNz.value.copy(s.normalFilterAbsNz.value);
+  	t.rgbAdjust.value = s.rgbAdjust.value;
+  	t.previewMarks.value = s.previewMarks.value;
+  	t.reducedMotion.value = s.reducedMotion.value;
+  	t.styleTime.value = s.styleTime.value;
+  	this.nodeResultStates = source.nodeResultStates;
+  	this.defaultNodeResultState = source.defaultNodeResultState;
   	this.uniformsNeedUpdate = true;
   }
 
@@ -549,6 +757,12 @@ export class PointCloudMaterial extends RawShaderMaterial
   	(this.defaultAttributeValues as Record<string, number[]>).overlayVisible = [1];
   	(this.defaultAttributeValues as Record<string, number[]>).overlayRGBA = [0, 0, 0, 0];
   	(this.defaultAttributeValues as Record<string, number[]>).indices = [0, 0, 0, 0];
+  	// Deterministic values for attributes a cloud lacks (the CPU twin reads 0 too).
+  	for (const name of ['intensity', 'returnNumber', 'numberOfReturns', 'pointSourceID', 'gpsTime'])
+  	{
+  		(this.defaultAttributeValues as Record<string, number[]>)[name] = [0];
+  	}
+  	(this.defaultAttributeValues as Record<string, number[]>).overlayEigen = [0, 0, 0, 0];
 
   	this.vertexColors = true;
 	
@@ -650,16 +864,6 @@ export class PointCloudMaterial extends RawShaderMaterial
   	define(OPACITY_DEFS[this.pointOpacityType]);
   	define(OUTPUT_COLOR_ENCODING[this.outputColorEncoding]);
   	define(INPUT_COLOR_ENCODING[this.inputColorEncoding]);
-
-  	// We only perform gamma and brightness/contrast calculations per point if values are specified.
-  	if (
-  		this.rgbGamma !== DEFAULT_RGB_GAMMA ||
-	  this.rgbBrightness !== DEFAULT_RGB_BRIGHTNESS ||
-	  this.rgbContrast !== DEFAULT_RGB_CONTRAST
-  	) 
-  	{
-  		define('use_rgb_gamma_contrast_brightness');
-  	}
 
   	if (this.useFilterByNormal) 
   	{
@@ -1005,6 +1209,15 @@ export class PointCloudMaterial extends RawShaderMaterial
 					materialUniforms.vnStart.value = vnStart;
 				}
 				materialUniforms.hasOverlayScalar.value = geometry.getAttribute('overlayScalar') ? 1 : 0;
+				materialUniforms.hasOverlayEigen.value = geometry.getAttribute('overlayEigen') ? 1 : 0;
+				materialUniforms.hasNormal.value = geometry.getAttribute('normal') ? 1 : 0;
+				materialUniforms.hasRgba.value = geometry.getAttribute('rgba') ? 1 : 0;
+				// The node's scene position is its box min relative to the cloud
+				// (potree.ts: matrixWorld = cloud.matrixWorld * node.matrix).
+				materialUniforms.nodeOffset.value.copy(node.sceneNode.position);
+				const result = material.nodeResultStates.get(node.name);
+				materialUniforms.nodeResultState.value = result ? result.state : material.defaultNodeResultState;
+				materialUniforms.resultAge.value = result ? performance.now() - result.since : 1e9;
 
 				// visibleNodes is sorted in texture order when the texture is in
 				// use, so a node's texel is its index (indexOf is O(nodes) per draw).

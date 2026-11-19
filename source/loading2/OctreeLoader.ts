@@ -7,7 +7,7 @@ import {OctreeGeometry} from './OctreeGeometry';
 import {RequestManager} from './RequestManager';
 import {MAX_NODE_LOAD_ATTEMPTS} from '../constants';
 import {loadRetryDelayMs} from './load-backoff';
-import {releaseArrayOnUpload, KEEP_CPU_ATTRIBUTES} from './release-on-upload';
+import {releaseArrayOnUpload, keepsCpuArray, SHADER_ATTRIBUTE_ALIASES} from './release-on-upload';
 
 /**
  * Callback invoked after a node's geometry is decoded and ready.
@@ -243,11 +243,13 @@ export class NodeLoader
 					range: batchAttribute.range
 				};
 				attribute = scalar;
+				property = SHADER_ATTRIBUTE_ALIASES[property] ?? property;
 			}
 
 			// Nothing on the CPU reads these once they are on the GPU (picking
-			// reads positions, overlays rewrite classification in place).
-			if (!KEEP_CPU_ATTRIBUTES.has(property))
+			// reads positions, overlays rewrite classification in place), unless
+			// the app retains one (a live filter's CPU twin).
+			if (!keepsCpuArray(property))
 			{
 				releaseArrayOnUpload(attribute);
 			}

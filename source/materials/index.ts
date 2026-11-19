@@ -7,3 +7,4 @@ export * from './scalar-filter';
 export * from './texture-generation';
 export * from './types';
 export * from './gradients';
+export * from './style';

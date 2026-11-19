@@ -12,7 +12,10 @@ in float classification;
 in float returnNumber;
 in float numberOfReturns;
 in float pointSourceID;
+in float gpsTime;
 in float overlayScalar;
+// Covariance eigenvalues l1 >= l2 >= l3 and the normal's z (live Select Field).
+in vec4 overlayEigen;
 // Per-point overlays written by processing results (defaults: visible, no tint).
 in float overlayVisible;
 in vec4 overlayRGBA;
@@ -89,6 +92,33 @@ uniform float overlayMax;
 uniform vec2 scalarFilterRange;
 uniform float scalarFilterEnabled;
 uniform float hasOverlayScalar;
+
+// ── Live style (uniforms only: a slider move never recompiles) ──────────────
+// Every test below has a CPU twin (app/src/style/styleCpuTwin.ts) that must
+// agree bit for bit: only exactly rounded operations (+, -, *, compares) feed
+// a hide decision, never division or a transcendental function.
+uniform int classHidden[8];         // 256-bit mask of hidden classes, every colour mode
+uniform int attrFilterAttr[4];      // 0 off, 1 intensity, 2 return number, 3 number of returns,
+                                    // 4 point source id, 5 gps time, 6 classification
+uniform vec2 attrFilterRange[4];    // keep [x, y] in the attribute's stored units
+uniform float clipAabbMode;         // 0 off, 1 keep inside, 2 keep outside (PassThrough / height range)
+uniform vec3 clipAabbMin;           // cloud frame (position + nodeOffset)
+uniform vec3 clipAabbMax;
+uniform vec3 nodeOffset;            // per node: its box min in the cloud frame
+uniform int scalarSource;           // 0 overlayScalar, 1 covariance feature, 2 slope (deg), 3 verticality
+uniform int featureIndex;           // 0 linearity .. 7 verticality (ScalarFieldId order)
+uniform vec2 scalarFilterDomain;    // scalarFilterRange mapped to the exact test's domain
+uniform float normalFilterEnabled;  // slope filter over the stored normal
+uniform vec2 normalFilterAbsNz;     // keep |n.z| in [x, y] (= slope in [acos y, acos x])
+uniform float hasOverlayEigen;      // per node
+uniform float hasNormal;            // per node
+uniform float hasRgba;              // per node
+uniform float rgbAdjust;            // 1: apply rgbGamma/Brightness/Contrast
+uniform float nodeResultState;      // per node: 0 untracked, 1 pending, 2 preview, 3 exact
+uniform float resultAge;            // per node: ms since its result arrived
+uniform float previewMarks;         // 1: desaturate preview nodes
+uniform float reducedMotion;        // 1: no shimmer
+uniform float styleTime;            // seconds, drives the preview shimmer
 
 // One texel per visible node, in rows of textureSize(visibleNodes).x texels.
 vec4 visibleNodeTexel(int i) {
@@ -245,31 +275,27 @@ float getContrastFactor(float contrast) {
 	return 1.0158730158730156 * (contrast + 1.0) / (1.0158730158730156 - contrast);
 }
 
-#ifndef new_format
-// Adjusts RGB values with gamma, contrast and brightness factors
-vec3 getRGB() {
-	#if defined(use_rgb_gamma_contrast_brightness)
-		vec3 rgb = pow(color, vec3(rgbGamma));
-		rgb += rgbBrightness;
-		rgb = (rgb - 0.5) * getContrastFactor(rgbContrast) + 0.5;
-		return clamp(rgb, 0.0, 1.0);
+// The point's own colour (Potree 2 "new format" clouds carry it in rgba).
+vec3 rawRGB() {
+	#ifdef new_format
+		return rgba.rgb;
 	#else
 		return color;
-	#else
-// Potree 2 ("new format") clouds carry colour in the rgba attribute.
-vec3 getRGB() {
-	#if defined(use_rgb_gamma_contrast_brightness)
-		vec3 rgb = pow(rgba.rgb, vec3(rgbGamma));
-		rgb += rgbBrightness;
-		rgb = (rgb - 0.5) * getContrastFactor(rgbContrast) + 0.5;
-		return clamp(rgb, 0.0, 1.0);
-	#else
-		return rgba.rgb;
 	#endif
 }
-#endif
+
+// Adjusts RGB values with gamma, contrast and brightness factors (a uniform
+// switch, so dragging a slider never recompiles the shader).
+vec3 getRGB() {
+	vec3 rgb = rawRGB();
+	if (rgbAdjust > 0.5) {
+		rgb = pow(max(rgb, vec3(0.0)), vec3(rgbGamma));
+		rgb += rgbBrightness;
+		rgb = (rgb - 0.5) * getContrastFactor(rgbContrast) + 0.5;
+		rgb = clamp(rgb, 0.0, 1.0);
+	}
+	return rgb;
 }
-#endif
 
 // Adjusts intensity value based on settings
 float getIntensity() {
@@ -300,21 +326,136 @@ vec3 getReturnNumber() {
 										vec3(0.0, 1.0, 0.0);
 }
 
-// Maps overlay scalar to gradient color
-vec3 getOverlayScalar() {
-	float w = clamp((overlayScalar - overlayMin) / max(overlayMax - overlayMin, 0.0001), 0.0, 1.0);
-	return texture(gradient, vec2(w, 1.0 - w)).rgb;
+bool isNaNBits(float v) {
+	uint bits = floatBitsToUint(v);
+	return (bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu) != 0u;
 }
 
-// Gets source ID color from gradient
-// The range filter hides every value outside [lo, hi], NaN included (as
+// A range test hides every value outside [lo, hi], NaN included (as
 // scalar-filter.ts does on the CPU). A NaN fails every comparison, so the test
 // is !(lo <= v <= hi), never (v < lo || v > hi); the bit test catches drivers
 // that fold NaN comparisons away.
+bool rangeHides(float v, vec2 range) {
+	return isNaNBits(v) || !(v >= range.x && v <= range.y);
+}
+
 bool scalarFilterHides(float v) {
-	uint bits = floatBitsToUint(v);
-	bool isNan = (bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu) != 0u;
-	return isNan || !(v >= scalarFilterRange.x && v <= scalarFilterRange.y);
+	return rangeHides(v, scalarFilterRange);
+}
+
+// Covariance features (Weinmann et al. 2017), ScalarFieldId order; e = (l1, l2, l3, n.z).
+float featureValue(vec4 e, int f) {
+	float l1 = e.x, l2 = e.y, l3 = e.z;
+	float sumEv = (l1 + l2) + l3;
+	if (f == 0) return (l1 - l2) / l1;
+	if (f == 1) return (l2 - l3) / l1;
+	if (f == 2) return l3 / l1;
+	if (f == 3) return pow(max((l1 * l2) * l3, 0.0), 1.0 / 3.0);
+	if (f == 4) return (l1 - l3) / l1;
+	if (f == 5) {
+		float h = 0.0;
+		vec3 n = vec3(l1, l2, l3) / sumEv;
+		if (n.x > 1e-10) h -= n.x * log(n.x);
+		if (n.y > 1e-10) h -= n.y * log(n.y);
+		if (n.z > 1e-10) h -= n.z * log(n.z);
+		return h;
+	}
+	if (f == 6) return l3 / sumEv;
+	return 1.0 - abs(e.w);
+}
+
+// The value the scalar colour mode and the scalar filter use.
+float styleScalar() {
+	if (scalarSource == 1) return featureValue(overlayEigen, featureIndex);
+	if (scalarSource == 2) return degrees(acos(clamp(abs(normal.z), 0.0, 1.0)));
+	if (scalarSource == 3) return 1.0 - abs(normal.z);
+	return overlayScalar;
+}
+
+// Per node: whether this node carries the scalar's inputs.
+float styleHasScalar() {
+	if (scalarSource == 1) return hasOverlayEigen;
+	if (scalarSource >= 2) return hasNormal;
+	return hasOverlayScalar;
+}
+
+// Ratio features are tested as lo * den <= num <= hi * den (den > 0): exact
+// operations only, so the CPU twin agrees bit for bit with the screen.
+bool ratioHides(float num, float den) {
+	return isNaNBits(num) || isNaNBits(den) ||
+		!(scalarFilterDomain.x * den <= num && num <= scalarFilterDomain.y * den);
+}
+
+// The scalar range filter over styleScalar(), in its exact form.
+bool styleScalarHides() {
+	if (scalarSource == 1) {
+		vec4 e = overlayEigen;
+		float l1 = e.x, l2 = e.y, l3 = e.z;
+		if (featureIndex == 0) return ratioHides(l1 - l2, l1);
+		if (featureIndex == 1) return ratioHides(l2 - l3, l1);
+		if (featureIndex == 2) return ratioHides(l3, l1);
+		if (featureIndex == 3) return rangeHides((l1 * l2) * l3, scalarFilterDomain);
+		if (featureIndex == 4) return ratioHides(l1 - l3, l1);
+		if (featureIndex == 6) return ratioHides(l3, (l1 + l2) + l3);
+		if (featureIndex == 7) return rangeHides(1.0 - abs(e.w), scalarFilterRange);
+		return rangeHides(featureValue(e, featureIndex), scalarFilterRange);
+	}
+	if (scalarSource == 2) return rangeHides(abs(normal.z), scalarFilterDomain);
+	if (scalarSource == 3) return rangeHides(1.0 - abs(normal.z), scalarFilterRange);
+	return rangeHides(overlayScalar, scalarFilterRange);
+}
+
+bool classIsHidden() {
+	int c = clamp(int(classification + 0.5), 0, 255);
+	return ((classHidden[c >> 5] >> (c & 31)) & 1) != 0;
+}
+
+float styleAttrValue(int a) {
+	if (a == 1) return intensity;
+	if (a == 2) return returnNumber;
+	if (a == 3) return numberOfReturns;
+	if (a == 4) return pointSourceID;
+	if (a == 5) return gpsTime;
+	return classification;
+}
+
+bool attrFiltersHide() {
+	for (int k = 0; k < 4; k++) {
+		int a = attrFilterAttr[k];
+		if (a != 0 && rangeHides(styleAttrValue(a), attrFilterRange[k])) return true;
+	}
+	return false;
+}
+
+bool clipAabbHides() {
+	if (clipAabbMode < 0.5) return false;
+	vec3 p = position + nodeOffset;
+	bool inside = all(greaterThanEqual(p, clipAabbMin)) && all(lessThanEqual(p, clipAabbMax));
+	return clipAabbMode < 1.5 ? !inside : inside;
+}
+
+// What a node without its result yet draws: its own colour, never the
+// gradient's low end (a pending node would otherwise read as "value 0").
+vec3 baseColor() {
+	return hasRgba > 0.5 ? rawRGB() : vec3(0.62);
+}
+
+// Maps the style scalar to the gradient, honouring the node's result state.
+vec3 getOverlayScalar() {
+	bool pending = nodeResultState > 0.5 && nodeResultState < 1.5;
+	if (pending || styleHasScalar() < 0.5) return baseColor();
+	float w = clamp((styleScalar() - overlayMin) / max(overlayMax - overlayMin, 0.0001), 0.0, 1.0);
+	vec3 c = texture(gradient, vec2(w, 1.0 - w)).rgb;
+	if (nodeResultState > 1.5 && nodeResultState < 2.5 && previewMarks > 0.5) {
+		// Preview: desaturated, with a slow 1.6 s shimmer unless motion is reduced.
+		float shimmer = reducedMotion > 0.5 ? 0.0 : 0.08 * sin(styleTime * 3.92699 + position.x * 0.7 + position.y * 0.5);
+		float luma = dot(c, vec3(0.299, 0.587, 0.114));
+		c = mix(c, vec3(luma), 0.45) + shimmer;
+	}
+	if (nodeResultState > 2.5 && resultAge < 150.0) {
+		c = mix(baseColor(), c, clamp(resultAge / 150.0, 0.0, 1.0));
+	}
+	return c;
 }
 
 vec3 getSourceID() {
@@ -457,9 +598,7 @@ void main() {
 		#define POTREE_SET_COLOR(c) vColor = (c)
 	#endif
 
-	#if defined(new_format) && defined(color_type_rgb)
-		vColor = rgba;
-	#elif defined color_type_rgb
+	#if defined color_type_rgb
 		POTREE_SET_COLOR(getRGB());
 	#elif defined color_type_height
 		POTREE_SET_COLOR(getElevation());
@@ -506,7 +645,15 @@ void main() {
 		gl_Position = vec4(100.0, 100.0, 100.0, 0.0);
 		return;
 	}
-	if (scalarFilterEnabled > 0.5 && hasOverlayScalar > 0.5 && scalarFilterHides(overlayScalar)) {
+	// The live style's hide tests (CPU twin: app/src/style/styleCpuTwin.ts).
+	// A pending node (no result yet) is never filtered by its missing value.
+	bool resultPending = nodeResultState > 0.5 && nodeResultState < 1.5;
+	if (scalarFilterEnabled > 0.5 && styleHasScalar() > 0.5 && !resultPending && styleScalarHides()) {
+		gl_Position = vec4(100.0, 100.0, 100.0, 0.0);
+		return;
+	}
+	if (classIsHidden() || attrFiltersHide() || clipAabbHides() ||
+		(normalFilterEnabled > 0.5 && hasNormal > 0.5 && rangeHides(abs(normal.z), normalFilterAbsNz))) {
 		gl_Position = vec4(100.0, 100.0, 100.0, 0.0);
 		return;
 	}

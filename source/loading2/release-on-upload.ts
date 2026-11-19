@@ -8,6 +8,49 @@ import type {ReleasableAttribute} from '../utils/memory-budget';
  */
 export const KEEP_CPU_ATTRIBUTES: ReadonlySet<string> = new Set(['position', 'classification']);
 
+/**
+ * Attributes the app asked to keep on the CPU as well (e.g. while a live
+ * style filter tests them, so CPU picking can mirror the shader). Applies to
+ * nodes decoded from now on; counted per request so callers can nest.
+ */
+const retainedCpuAttributes = new Map<string, number>();
+
+export function retainCpuAttribute(name: string): void
+{
+	retainedCpuAttributes.set(name, (retainedCpuAttributes.get(name) ?? 0) + 1);
+}
+
+export function releaseCpuAttribute(name: string): void
+{
+	const n = (retainedCpuAttributes.get(name) ?? 0) - 1;
+	if (n > 0)
+	{
+		retainedCpuAttributes.set(name, n);
+	}
+	else
+	{
+		retainedCpuAttributes.delete(name);
+	}
+}
+
+/** Whether a decoded attribute keeps its CPU array after upload. */
+export function keepsCpuArray(name: string): boolean
+{
+	return KEEP_CPU_ATTRIBUTES.has(name) || retainedCpuAttributes.has(name);
+}
+
+/**
+ * Potree 2 attribute names (metadata.json) that are not GLSL identifiers,
+ * mapped to the names pointcloud.vs binds. Without this, return number,
+ * number of returns, point source id and gps time never reach the shader.
+ */
+export const SHADER_ATTRIBUTE_ALIASES: Readonly<Record<string, string>> = {
+	'return number': 'returnNumber',
+	'number of returns': 'numberOfReturns',
+	'point source id': 'pointSourceID',
+	'gps-time': 'gpsTime',
+};
+
 type TypedArrayConstructor = new (length: number) => BufferAttribute['array'];
 
 /**
