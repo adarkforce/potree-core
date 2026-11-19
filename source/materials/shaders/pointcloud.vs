@@ -307,6 +307,16 @@ vec3 getOverlayScalar() {
 }
 
 // Gets source ID color from gradient
+// The range filter hides every value outside [lo, hi], NaN included (as
+// scalar-filter.ts does on the CPU). A NaN fails every comparison, so the test
+// is !(lo <= v <= hi), never (v < lo || v > hi); the bit test catches drivers
+// that fold NaN comparisons away.
+bool scalarFilterHides(float v) {
+	uint bits = floatBitsToUint(v);
+	bool isNan = (bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu) != 0u;
+	return isNan || !(v >= scalarFilterRange.x && v <= scalarFilterRange.y);
+}
+
 vec3 getSourceID() {
 	float w = mod(pointSourceID, 10.0) / 10.0;
 	return texture(gradient, vec2(w, 1.0 - w)).rgb;
@@ -496,8 +506,7 @@ void main() {
 		gl_Position = vec4(100.0, 100.0, 100.0, 0.0);
 		return;
 	}
-	if (scalarFilterEnabled > 0.5 && hasOverlayScalar > 0.5 &&
-		(overlayScalar < scalarFilterRange.x || overlayScalar > scalarFilterRange.y)) {
+	if (scalarFilterEnabled > 0.5 && hasOverlayScalar > 0.5 && scalarFilterHides(overlayScalar)) {
 		gl_Position = vec4(100.0, 100.0, 100.0, 0.0);
 		return;
 	}

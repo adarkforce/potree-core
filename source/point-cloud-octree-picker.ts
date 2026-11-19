@@ -308,6 +308,10 @@ export class PointCloudOctreePicker
 		pickMaterial.classification = nodeMaterial.classification;
 		pickMaterial.useFilterByNormal = nodeMaterial.useFilterByNormal;
 		pickMaterial.filterByNormalThreshold = nodeMaterial.filterByNormalThreshold;
+		// Points the scalar range filter hides are not drawn, so they cannot be picked.
+		pickMaterial.uniforms.scalarFilterRange.value.copy(nodeMaterial.uniforms.scalarFilterRange.value);
+		pickMaterial.uniforms.scalarFilterEnabled.value = nodeMaterial.uniforms.scalarFilterEnabled.value;
+		pickMaterial.uniformsNeedUpdate = true;
 
 		if (params.pickOutsideClipRegion) 
 		{
