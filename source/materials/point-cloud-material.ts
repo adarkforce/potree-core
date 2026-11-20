@@ -844,7 +844,27 @@ export class PointCloudMaterial extends RawShaderMaterial
   	this.needsUpdate = true;
   }
 
-  applyDefines(shaderSrc: string): string 
+  /**
+   * The shader sources this material would use with another colour mode,
+   * everything else unchanged (no side effects). Lets the app compile those
+   * program variants ahead of time, so a colour-mode switch is a cache hit.
+   */
+  shaderSourceFor(colorType: PointColorType): {vertexShader: string; fragmentShader: string}
+  {
+  	const self = this as unknown as {_pointColorType: PointColorType};
+  	const previous = self._pointColorType;
+  	self._pointColorType = colorType;
+  	try
+  	{
+  		return {vertexShader: this.applyDefines(VertShader), fragmentShader: this.applyDefines(FragShader)};
+  	}
+  	finally
+  	{
+  		self._pointColorType = previous;
+  	}
+  }
+
+  applyDefines(shaderSrc: string): string
   {
   	const parts: string[] = [];
 
