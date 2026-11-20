@@ -73,36 +73,7 @@ export class NodeLoader
 				await this.loadHierarchy(node);
 			}
 
-			let {byteOffset, byteSize} = node;
-			
-			if (byteOffset === undefined || byteSize === undefined) 
-			{
-				throw new Error('byteOffset and byteSize are required');
-			}
-
-			let urlOctree = (await this.requestManager.getUrl(this.url)).replace('/metadata.json', '/octree.bin');
-
-			let first = byteOffset;
-			let last = byteOffset + byteSize - BigInt(1);
-
-			let buffer;
-
-			if (byteSize === BigInt(0))
-			{
-				buffer = new ArrayBuffer(0);
-				console.warn(`loaded node with 0 bytes: ${node.name}`);
-			}
-			else 
-			{
-				let response = await this.requestManager.fetch(urlOctree, {
-					headers: {
-						'content-type': 'multipart/byteranges',
-						'Range': `bytes=${first}-${last}`
-					}
-				});
-
-				buffer = await response.arrayBuffer();
-			}
+			let buffer = await this.fetchNodeBuffer(node);
 
 			const workerType = this.metadata.encoding === 'BROTLI' ? WorkerType.DECODER_WORKER_BROTLI : WorkerType.DECODER_WORKER;
 			const worker = this.workerPool.getWorker(workerType);
@@ -143,35 +114,13 @@ export class NodeLoader
 				}
 			};
 
-			let pointAttributes = node.octreeGeometry.pointAttributes;
-			let scale = node.octreeGeometry.scale;
-
-			let box = node.boundingBox;
-			let min = node.octreeGeometry.offset.clone().add(box.min);
-			let size = box.max.clone().sub(box.min);
-			let max = min.clone().add(size);
-			let numPoints = node.numPoints;
-
-			let offset = node.octreeGeometry.loader.offset;
-
 			const injectFault = NodeLoader.debugFailNextDecodes > 0;
 			if (injectFault)
 			{
 				NodeLoader.debugFailNextDecodes--;
 			}
 
-			let message = {
-				name: node.name,
-				buffer: buffer,
-				pointAttributes: pointAttributes,
-				scale: scale,
-				min: min,
-				max: max,
-				size: size,
-				offset: offset,
-				numPoints: numPoints,
-				debugThrow: injectFault
-			};
+			const message = this.decodeMessage(node, buffer, injectFault);
 
 			try
 			{
@@ -188,6 +137,117 @@ export class NodeLoader
 		{
 			this.loadFailed(node, String(e));
 		}
+	}
+
+	/** The node's byte range of octree.bin. */
+	private async fetchNodeBuffer(node: OctreeGeometryNode): Promise<ArrayBuffer>
+	{
+		const {byteOffset, byteSize} = node;
+		if (byteOffset === undefined || byteSize === undefined)
+		{
+			throw new Error('byteOffset and byteSize are required');
+		}
+		if (byteSize === BigInt(0))
+		{
+			console.warn(`loaded node with 0 bytes: ${node.name}`);
+			return new ArrayBuffer(0);
+		}
+		const urlOctree = (await this.requestManager.getUrl(this.url)).replace('/metadata.json', '/octree.bin');
+		const first = byteOffset;
+		const last = byteOffset + byteSize - BigInt(1);
+		const response = await this.requestManager.fetch(urlOctree, {
+			headers: {
+				'content-type': 'multipart/byteranges',
+				'Range': `bytes=${first}-${last}`
+			}
+		});
+		return response.arrayBuffer();
+	}
+
+	/** The decoder worker's request for one node. */
+	private decodeMessage(node: OctreeGeometryNode, buffer: ArrayBuffer, debugThrow: boolean)
+	{
+		const box = node.boundingBox;
+		const min = node.octreeGeometry.offset.clone().add(box.min);
+		const size = box.max.clone().sub(box.min);
+		const max = min.clone().add(size);
+		return {
+			name: node.name,
+			buffer: buffer,
+			pointAttributes: node.octreeGeometry.pointAttributes,
+			scale: node.octreeGeometry.scale,
+			min: min,
+			max: max,
+			size: size,
+			offset: node.octreeGeometry.loader.offset,
+			numPoints: node.numPoints,
+			debugThrow: debugThrow
+		};
+	}
+
+	/**
+	 * Fetches and decodes a loaded node again and returns the CPU arrays of the
+	 * named attributes (shader names, e.g. 'normal', 'intensity', 'gpsTime'),
+	 * with the same values the GPU holds. Leaves the node's geometry alone: for
+	 * a CPU consumer (a live filter's picking twin) that needs an attribute
+	 * whose CPU copy was released after upload. Missing names are left out.
+	 */
+	public async fetchCpuAttributes(node: OctreeGeometryNode, names: readonly string[]): Promise<Map<string, Float32Array>>
+	{
+		const buffer = await this.fetchNodeBuffer(node);
+		const workerType = this.metadata.encoding === 'BROTLI' ? WorkerType.DECODER_WORKER_BROTLI : WorkerType.DECODER_WORKER;
+		const worker = this.workerPool.getWorker(workerType);
+		const data = await new Promise<any>((resolve, reject) =>
+		{
+			const detach = () =>
+			{
+				worker.onmessage = null;
+				worker.onerror = null;
+				worker.onmessageerror = null;
+			};
+			worker.onerror = (event) =>
+			{
+				event.preventDefault();
+				detach();
+				worker.terminate();
+				reject(new Error(`decoder error: ${event.message}`));
+			};
+			worker.onmessageerror = () =>
+			{
+				detach();
+				this.workerPool.returnWorker(workerType, worker);
+				reject(new Error('decoder reply could not be deserialized'));
+			};
+			worker.onmessage = (e) =>
+			{
+				detach();
+				this.workerPool.returnWorker(workerType, worker);
+				resolve(e.data);
+			};
+			const message = this.decodeMessage(node, buffer, false);
+			try
+			{
+				worker.postMessage(message, [message.buffer]);
+			}
+			catch (error)
+			{
+				detach();
+				this.workerPool.returnWorker(workerType, worker);
+				reject(error);
+			}
+		});
+		const wanted = new Set(names);
+		const out = new Map<string, Float32Array>();
+		const buffers = data.attributeBuffers ?? {};
+		for (const raw in buffers)
+		{
+			const name = raw === 'NORMAL' ? 'normal' : SHADER_ATTRIBUTE_ALIASES[raw] ?? raw;
+			if (wanted.has(name) && name !== 'position' && name !== 'rgba' && name !== 'indices' && raw !== 'INDICES')
+			{
+				out.set(name, new Float32Array(buffers[raw].buffer));
+			}
+		}
+		return out;
 	}
 
 	/**
@@ -653,4 +713,20 @@ export class OctreeLoader
 
 	}
 
+}
+
+/**
+ * Re-decodes a loaded Potree 2 node's attributes for a CPU consumer (see
+ * NodeLoader.fetchCpuAttributes). Null for a node of another loader (Potree 1),
+ * which keeps no released arrays to recover.
+ */
+export function fetchNodeCpuAttributes(geometryNode: unknown, names: readonly string[]): Promise<Map<string, Float32Array>> | null
+{
+	const node = geometryNode as OctreeGeometryNode | null;
+	const loader = node?.octreeGeometry?.loader;
+	if (!node || !(loader instanceof NodeLoader) || !node.loaded)
+	{
+		return null;
+	}
+	return loader.fetchCpuAttributes(node, names);
 }

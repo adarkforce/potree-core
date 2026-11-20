@@ -11,7 +11,7 @@ export * from './rendering/edl-pass';
 export * from './rendering/potree-renderer';
 export * from './types';
 export * from './version';
-export {NodeLoader} from './loading2/OctreeLoader';
+export {NodeLoader, fetchNodeCpuAttributes} from './loading2/OctreeLoader';
 export type {NodeLoadedCallback} from './loading2/OctreeLoader';
 export * from './utils/memory-budget';
 export {LRU} from './utils/lru';
