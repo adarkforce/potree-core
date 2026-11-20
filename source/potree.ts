@@ -53,6 +53,7 @@ export class QueueItem
 		public weight: number,
 		public node: IPointCloudTreeNode,
 		public parent?: IPointCloudTreeNode | null,
+		public screenPixelRadius: number = Infinity,
 	) {}
 }
 
@@ -261,7 +262,7 @@ export class Potree implements IPotree
 			if (isTreeNode(node)) 
 			{
 				// @ts-ignore
-				this.updateTreeNodeVisibility(pointCloud, node, visibleNodes);
+				this.updateTreeNodeVisibility(pointCloud, node, visibleNodes, queueItem);
 				// @ts-ignore
 				pointCloud.visibleGeometry.push(node.geometryNode);
 			}
@@ -306,9 +307,12 @@ export class Potree implements IPotree
 		pointCloud: PointCloudOctree,
 		node: PointCloudOctreeNode,
 		visibleNodes: IPointCloudTreeNode[],
+		queueItem: QueueItem,
 	): void 
 	{
 		this.lru.touch(node.geometryNode);
+		node.weight = queueItem.weight;
+		node.screenPixelRadius = queueItem.screenPixelRadius;
 
 		const sceneNode = node.sceneNode;
 		sceneNode.visible = true;
@@ -373,7 +377,7 @@ export class Potree implements IPotree
 			}
 
 			// Nodes which are larger will have priority in loading/displaying.
-			priorityQueue.push(new QueueItem(queueItem.pointCloudIndex, weight, child, node));
+			priorityQueue.push(new QueueItem(queueItem.pointCloudIndex, weight, child, node, screenPixelRadius));
 		}
 	}
 

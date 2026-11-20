@@ -54,6 +54,16 @@ export class PointCloudOctreeNode extends EventDispatcher implements IPointCloud
 	 */
 	public readonly isGeometryNode: boolean = false;
 
+	/**
+	 * Visibility weight of the last frame that drew this node (the loading
+	 * priority: projected radius + 1 / distance; Number.MAX_VALUE for the root
+	 * and for nodes the camera is inside). Apps use it to prioritise per-node work.
+	 */
+	public weight = 0;
+
+	/** Projected bounding-sphere radius in pixels in the last frame that drew this node (Infinity for the root). */
+	public screenPixelRadius = 0;
+
 	public constructor(geometryNode: PointCloudOctreeGeometryNode, sceneNode: Points) 
 	{
 		super();
